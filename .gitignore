@@ -1,0 +1,30 @@
+# Keil / ARMCC build output
+*.o
+*.d
+*.axf
+*.hex
+*.map
+*.htm
+*.lnp
+*.dep
+*.iex
+*.scvd
+*.uvguix.*
+*.build_log.htm
+
+# Common temporary files
+*.log
+*.tmp
+*.bak
+*.orig
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code local settings
+.vscode/
+
