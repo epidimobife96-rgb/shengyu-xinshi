@@ -37,10 +37,10 @@ DIGIT_SYMBOLS = {
 }
 
 DIGIT_PREAMBLE = ["00", "01", "10", "11"]
-DIGIT_START = ["11", "10"]
+DIGIT_START = ["01", "10"]
 DIGIT_END = ["10", "11"]
-DIGIT_GAP_MS = 50
-DIGIT_REPEAT = 2
+DIGIT_GAP_MS = 70
+DIGIT_REPEAT = 3
 
 
 class FSK4AudioTester:
@@ -74,7 +74,7 @@ class FSK4AudioTester:
         ttk.Entry(control_frame, textvariable=self.duration_var, width=12).pack(anchor="w", pady=2)
 
         ttk.Label(control_frame, text="4-FSK 单码元时间 / ms").pack(anchor="w")
-        self.symbol_ms_var = tk.StringVar(value="180")
+        self.symbol_ms_var = tk.StringVar(value="220")
         ttk.Entry(control_frame, textvariable=self.symbol_ms_var, width=12).pack(anchor="w", pady=2)
 
         ttk.Separator(control_frame).pack(fill=tk.X, pady=8)

@@ -23,9 +23,14 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#if defined(__ARMCC_VERSION)
+#include <rt_sys.h>
+#endif
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN Semihosting */
+extern UART_HandleTypeDef huart2;
+
 #if defined(__ARMCC_VERSION) && !defined(__CC_ARM)
 __asm(".global __use_no_semihosting\n");
 #endif
@@ -46,6 +51,55 @@ void _sys_exit(int status)
   while (1)
   {
   }
+}
+
+FILEHANDLE _sys_open(const char *name, int openmode)
+{
+  (void)name;
+  (void)openmode;
+  return 1;
+}
+
+int _sys_close(FILEHANDLE fh)
+{
+  (void)fh;
+  return 0;
+}
+
+int _sys_write(FILEHANDLE fh, const unsigned char *buf, unsigned len, int mode)
+{
+  (void)fh;
+  (void)mode;
+  HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)len, HAL_MAX_DELAY);
+  return 0;
+}
+
+int _sys_read(FILEHANDLE fh, unsigned char *buf, unsigned len, int mode)
+{
+  (void)fh;
+  (void)buf;
+  (void)len;
+  (void)mode;
+  return 0;
+}
+
+int _sys_istty(FILEHANDLE fh)
+{
+  (void)fh;
+  return 1;
+}
+
+int _sys_seek(FILEHANDLE fh, long pos)
+{
+  (void)fh;
+  (void)pos;
+  return -1;
+}
+
+long _sys_flen(FILEHANDLE fh)
+{
+  (void)fh;
+  return -1;
 }
 
 int ferror(FILE *f)
@@ -91,10 +145,14 @@ typedef enum
 #define FSK_FREQ_COUNT            4U
 #define FSK_ENERGY_THRESHOLD      5000000.0f
 #define FSK_RATIO_THRESHOLD       1.3f
-#define OLED_DEBUG_UPDATE_MS      200U
-#define DEBUG_UART_ENABLE         0U
+#define FSK_NOISE_MULTIPLIER      3.0f
+#define FSK_NOISE_MIN_FLOOR       3000000.0f
+#define OLED_IDLE_UPDATE_MS       1000U
+#define DEBUG_UART_ENABLE         1U
+#define UART_IDLE_LOG_MS          1000U
 #define DIGIT_STABLE_WINDOWS      2U
-#define DIGIT_FRAME_TIMEOUT_MS    1800U
+#define DIGIT_GAP_INVALID_WINDOWS 2U
+#define DIGIT_FRAME_TIMEOUT_MS    5000U
 #define DIGIT_NO_SYMBOL           0xFFU
 #define DIGIT_PREAMBLE_LEN        4U
 #define DIGIT_START_LEN           2U
@@ -139,13 +197,20 @@ static const uint8_t digit_codebook[10][2] = {
   {0x03U, 0x00U}  /* 9 */
 };
 static const uint8_t digit_preamble[DIGIT_PREAMBLE_LEN] = {0x00U, 0x01U, 0x02U, 0x03U};
-static const uint8_t digit_start[DIGIT_START_LEN] = {0x03U, 0x02U};
+static const uint8_t digit_start[DIGIT_START_LEN] = {0x01U, 0x02U};
 static const uint8_t digit_end[DIGIT_END_LEN] = {0x02U, 0x03U};
 static float fsk_goertzel_coeffs[FSK_FREQ_COUNT];
 static uint16_t oled_i2c_addr = OLED_I2C_ADDR_3C;
 static uint8_t oled_ready = 0U;
+static float fsk_noise_floor[FSK_FREQ_COUNT] = {
+  FSK_NOISE_MIN_FLOOR,
+  FSK_NOISE_MIN_FLOOR,
+  FSK_NOISE_MIN_FLOOR,
+  FSK_NOISE_MIN_FLOOR
+};
 static uint8_t digit_candidate_bits = DIGIT_NO_SYMBOL;
 static uint8_t digit_candidate_count = 0U;
+static uint8_t digit_invalid_count = 0U;
 static uint8_t digit_run_active = 0U;
 static uint8_t digit_run_bits = DIGIT_NO_SYMBOL;
 static DigitRxState digit_rx_state = DIGIT_RX_SEARCH;
@@ -155,6 +220,13 @@ static uint8_t digit_frame_error = 0U;
 static uint32_t digit_frame_tick = 0U;
 static uint8_t digit_last_valid = 0U;
 static uint8_t digit_last_value = 0U;
+static uint8_t uart_log_event = 0U;
+static const char *uart_log_text = "";
+static uint8_t uart_log_digit_valid = 0U;
+static uint8_t uart_log_digit_value = 0U;
+static uint8_t uart_log_expected_bits = DIGIT_NO_SYMBOL;
+static uint8_t uart_log_got_bits = DIGIT_NO_SYMBOL;
+static uint8_t uart_log_data_bits[2] = {DIGIT_NO_SYMBOL, DIGIT_NO_SYMBOL};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -175,6 +247,9 @@ static void DigitRx_Process(const FSK_DetectResult *result, uint32_t now);
 static void DigitRx_AcceptSymbol(uint8_t bits, uint32_t now);
 static int8_t DigitRx_DecodePair(uint8_t first_bits, uint8_t second_bits);
 static void DigitRx_ResetFrame(void);
+static void DigitRx_LogEvent(const char *text);
+static void DigitRx_LogFailure(const char *text, uint8_t got_bits, uint8_t expected_bits);
+static void DigitRx_LogDigit(uint8_t digit);
 
 static uint8_t OLED_Init(void);
 static void OLED_Clear(void);
@@ -262,8 +337,30 @@ static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len)
   result.max_energy = energies[max_index];
   result.second_energy = energies[second_index];
 
+  for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+  {
+    float floor = fsk_noise_floor[i];
+
+    if (energies[i] > floor)
+    {
+      floor = (0.995f * floor) + (0.005f * energies[i]);
+    }
+    else
+    {
+      floor = (0.95f * floor) + (0.05f * energies[i]);
+    }
+
+    if (floor < FSK_NOISE_MIN_FLOOR)
+    {
+      floor = FSK_NOISE_MIN_FLOOR;
+    }
+
+    fsk_noise_floor[i] = floor;
+  }
+
   if ((result.max_energy > FSK_ENERGY_THRESHOLD) &&
-      (result.max_energy > (result.second_energy * FSK_RATIO_THRESHOLD)))
+      (result.max_energy > (result.second_energy * FSK_RATIO_THRESHOLD)) &&
+      (result.max_energy > (fsk_noise_floor[max_index] * FSK_NOISE_MULTIPLIER)))
   {
     result.valid = 1U;
     result.freq_hz = fsk_freqs_hz[max_index];
@@ -277,30 +374,85 @@ static void FSK_ProcessSymbol(const uint16_t *samples)
 {
   FSK_DetectResult result = FSK_DetectSymbol(samples, FSK_SYMBOL_SAMPLES);
   static uint32_t last_oled_update = 0U;
+  static uint32_t last_idle_log = 0U;
+  static uint8_t last_digit_valid = 0U;
+  static uint8_t last_digit_value = 0U;
+  static uint8_t last_frame_error = 0U;
   uint32_t now = HAL_GetTick();
+  uint8_t oled_update_now = 0U;
 
   DigitRx_Process(&result, now);
 
 #if DEBUG_UART_ENABLE
-  if (result.valid != 0U)
+  if (uart_log_event != 0U)
   {
-    printf("detected: %uHz -> %s, Emax=%lu, E2=%lu\r\n",
-           result.freq_hz,
-           FSK_BitsToString(result.bits),
-           (uint32_t)result.max_energy,
-           (uint32_t)result.second_energy);
+    if (uart_log_digit_valid != 0U)
+    {
+      printf("%s: DIGIT=%u, DATA=%s %s, Emax=%u, E2=%u, N=%u\r\n",
+             uart_log_text,
+             uart_log_digit_value,
+             FSK_BitsToString(uart_log_data_bits[0]),
+             FSK_BitsToString(uart_log_data_bits[1]),
+             (unsigned int)result.max_energy,
+             (unsigned int)result.second_energy,
+             (unsigned int)fsk_noise_floor[result.bits]);
+    }
+    else if (uart_log_expected_bits != DIGIT_NO_SYMBOL)
+    {
+      printf("%s: got=%s expected=%s, DATA=%s %s, Emax=%u, E2=%u, N=%u\r\n",
+             uart_log_text,
+             FSK_BitsToString(uart_log_got_bits),
+             FSK_BitsToString(uart_log_expected_bits),
+             FSK_BitsToString(uart_log_data_bits[0]),
+             FSK_BitsToString(uart_log_data_bits[1]),
+             (unsigned int)result.max_energy,
+             (unsigned int)result.second_energy,
+             (unsigned int)fsk_noise_floor[result.bits]);
+    }
+    else
+    {
+      printf("%s: %uHz -> %s, DATA=%s %s, Emax=%u, E2=%u, N=%u\r\n",
+             uart_log_text,
+             result.freq_hz,
+             FSK_BitsToString(result.bits),
+             FSK_BitsToString(uart_log_data_bits[0]),
+             FSK_BitsToString(uart_log_data_bits[1]),
+             (unsigned int)result.max_energy,
+             (unsigned int)result.second_energy,
+             (unsigned int)fsk_noise_floor[result.bits]);
+    }
+    uart_log_event = 0U;
+    uart_log_digit_valid = 0U;
+    uart_log_expected_bits = DIGIT_NO_SYMBOL;
+    uart_log_got_bits = DIGIT_NO_SYMBOL;
   }
-  else
+  else if ((result.valid == 0U) && ((now - last_idle_log) >= UART_IDLE_LOG_MS))
   {
-    printf("invalid/no signal, Emax=%lu, E2=%lu\r\n",
-           (uint32_t)result.max_energy,
-           (uint32_t)result.second_energy);
+    last_idle_log = now;
+    printf("idle: Emax=%u, E2=%u\r\n",
+           (unsigned int)result.max_energy,
+           (unsigned int)result.second_energy);
   }
 #endif
 
-  if ((now - last_oled_update) >= OLED_DEBUG_UPDATE_MS)
+  if ((digit_last_valid != last_digit_valid) ||
+      ((digit_last_valid != 0U) && (digit_last_value != last_digit_value)) ||
+      (digit_frame_error != last_frame_error))
+  {
+    oled_update_now = 1U;
+  }
+  else if ((digit_rx_state == DIGIT_RX_SEARCH) &&
+           ((now - last_oled_update) >= OLED_IDLE_UPDATE_MS))
+  {
+    oled_update_now = 1U;
+  }
+
+  if (oled_update_now != 0U)
   {
     last_oled_update = now;
+    last_digit_valid = digit_last_valid;
+    last_digit_value = digit_last_value;
+    last_frame_error = digit_frame_error;
     OLED_PrintDetected(&result);
   }
 }
@@ -309,6 +461,31 @@ static const char *FSK_BitsToString(uint8_t bits)
 {
   static const char *bit_text[FSK_FREQ_COUNT] = {"00", "01", "10", "11"};
   return bit_text[bits & 0x03U];
+}
+
+static void DigitRx_LogEvent(const char *text)
+{
+  uart_log_event = 1U;
+  uart_log_text = text;
+  uart_log_digit_valid = 0U;
+  uart_log_expected_bits = DIGIT_NO_SYMBOL;
+  uart_log_got_bits = DIGIT_NO_SYMBOL;
+  uart_log_data_bits[0] = digit_data_bits[0];
+  uart_log_data_bits[1] = digit_data_bits[1];
+}
+
+static void DigitRx_LogFailure(const char *text, uint8_t got_bits, uint8_t expected_bits)
+{
+  DigitRx_LogEvent(text);
+  uart_log_got_bits = got_bits;
+  uart_log_expected_bits = expected_bits;
+}
+
+static void DigitRx_LogDigit(uint8_t digit)
+{
+  DigitRx_LogEvent("digit_ok");
+  uart_log_digit_valid = 1U;
+  uart_log_digit_value = digit;
 }
 
 static void DigitRx_Process(const FSK_DetectResult *result, uint32_t now)
@@ -320,11 +497,22 @@ static void DigitRx_Process(const FSK_DetectResult *result, uint32_t now)
 
   if (result->valid == 0U)
   {
-    digit_candidate_bits = DIGIT_NO_SYMBOL;
-    digit_candidate_count = 0U;
-    digit_run_active = 0U;
+    if (digit_invalid_count < 255U)
+    {
+      digit_invalid_count++;
+    }
+
+    if (digit_invalid_count >= DIGIT_GAP_INVALID_WINDOWS)
+    {
+      digit_candidate_bits = DIGIT_NO_SYMBOL;
+      digit_candidate_count = 0U;
+      digit_run_active = 0U;
+    }
+
     return;
   }
+
+  digit_invalid_count = 0U;
 
   if (digit_candidate_bits == result->bits)
   {
@@ -371,6 +559,7 @@ static void DigitRx_AcceptSymbol(uint8_t bits, uint32_t now)
           digit_rx_state = DIGIT_RX_START_0;
           digit_frame_error = 0U;
           digit_last_valid = 0U;
+          DigitRx_LogEvent("preamble");
         }
       }
       else
@@ -381,30 +570,50 @@ static void DigitRx_AcceptSymbol(uint8_t bits, uint32_t now)
 
     case DIGIT_RX_START_0:
       digit_rx_state = (bits == digit_start[0]) ? DIGIT_RX_START_1 : DIGIT_RX_SEARCH;
+      if (digit_rx_state == DIGIT_RX_START_1)
+      {
+        DigitRx_LogEvent("start0");
+      }
+      else
+      {
+        DigitRx_LogFailure("start_fail", bits, digit_start[0]);
+      }
       break;
 
     case DIGIT_RX_START_1:
       digit_rx_state = (bits == digit_start[1]) ? DIGIT_RX_DATA_0 : DIGIT_RX_SEARCH;
+      if (digit_rx_state == DIGIT_RX_DATA_0)
+      {
+        DigitRx_LogEvent("start_ok");
+      }
+      else
+      {
+        DigitRx_LogFailure("start_fail", bits, digit_start[1]);
+      }
       break;
 
     case DIGIT_RX_DATA_0:
       digit_data_bits[0] = bits;
       digit_rx_state = DIGIT_RX_DATA_1;
+      DigitRx_LogEvent("data0");
       break;
 
     case DIGIT_RX_DATA_1:
       digit_data_bits[1] = bits;
       digit_rx_state = DIGIT_RX_CHECK_0;
+      DigitRx_LogEvent("data1");
       break;
 
     case DIGIT_RX_CHECK_0:
       if (bits == (uint8_t)(digit_data_bits[0] ^ 0x03U))
       {
         digit_rx_state = DIGIT_RX_CHECK_1;
+        DigitRx_LogEvent("check0");
       }
       else
       {
         digit_frame_error = 1U;
+        DigitRx_LogFailure("check_fail0", bits, (uint8_t)(digit_data_bits[0] ^ 0x03U));
         DigitRx_ResetFrame();
       }
       break;
@@ -413,10 +622,12 @@ static void DigitRx_AcceptSymbol(uint8_t bits, uint32_t now)
       if (bits == (uint8_t)(digit_data_bits[1] ^ 0x03U))
       {
         digit_rx_state = DIGIT_RX_END_0;
+        DigitRx_LogEvent("check_ok");
       }
       else
       {
         digit_frame_error = 1U;
+        DigitRx_LogFailure("check_fail1", bits, (uint8_t)(digit_data_bits[1] ^ 0x03U));
         DigitRx_ResetFrame();
       }
       break;
@@ -425,10 +636,12 @@ static void DigitRx_AcceptSymbol(uint8_t bits, uint32_t now)
       if (bits == digit_end[0])
       {
         digit_rx_state = DIGIT_RX_END_1;
+        DigitRx_LogEvent("end0");
       }
       else
       {
         digit_frame_error = 1U;
+        DigitRx_LogFailure("end_fail0", bits, digit_end[0]);
         DigitRx_ResetFrame();
       }
       break;
@@ -442,15 +655,18 @@ static void DigitRx_AcceptSymbol(uint8_t bits, uint32_t now)
           digit_last_valid = 1U;
           digit_last_value = (uint8_t)digit;
           digit_frame_error = 0U;
+          DigitRx_LogDigit((uint8_t)digit);
         }
         else
         {
           digit_frame_error = 1U;
+          DigitRx_LogEvent("digit_bad");
         }
       }
       else
       {
         digit_frame_error = 1U;
+        DigitRx_LogFailure("end_fail1", bits, digit_end[1]);
       }
       DigitRx_ResetFrame();
       break;
@@ -752,7 +968,7 @@ static void OLED_PrintDetected(const FSK_DetectResult *result)
   }
   else
   {
-    OLED_PrintAt(0U, 2U, "INVALID");
+    OLED_PrintAt(0U, 2U, "WAIT");
   }
 
   (void)snprintf(line, sizeof(line), "MAX %uK", (unsigned int)max_k);
