@@ -45,7 +45,7 @@
 - `hardware/filter/`：接收端模拟滤波器 Multisim 文件和网表。
 - `hardware/mcu_board/`：单片机核心板原理图、网表和工程资料。
 - `hardware/syxs_board/`：声语信使整板原理图和网表。
-- `hardware/speaker_filter/`：发送端喇叭/功放前滤波器网表。
+- `hardware/speaker_filter/`：发送端喇叭/功放前滤波器 Multisim 设计和网表。
 - `logs/`：课程工作日志和串口调试原始记录。
 - `software/stm32_receive/`：STM32F411 接收端 CubeMX/HAL/Keil 工程。
 - `software/stm32_send/`：STM32F411 发送端 CubeMX/HAL/Keil 工程。
