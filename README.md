@@ -44,7 +44,7 @@
 - `docs/`：课程任务书、器件资料、硬件检查记录、调试记录汇总。
 - `hardware/filter/`：接收端模拟滤波器 Multisim 文件和网表。
 - `hardware/mcu_board/`：单片机核心板原理图、网表和工程资料。
-- `hardware/syxs_board/`：声语信使整板原理图和网表。
+- `hardware/syxs_board/`：声语信使第二版整板原理图、网表、EasyEDA Pro 工程和 Altium PCB 工程包。
 - `hardware/speaker_filter/`：发送端喇叭/功放前滤波器 Multisim 设计和网表。
 - `logs/`：课程工作日志和串口调试原始记录。
 - `software/stm32_receive/`：STM32F411 接收端 CubeMX/HAL/Keil 工程。
