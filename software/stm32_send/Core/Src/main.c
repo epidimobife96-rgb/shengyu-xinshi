@@ -59,6 +59,8 @@ typedef enum
 #define TX_SINE_TABLE_BITS      6U
 #define TX_SINE_TABLE_SIZE      (1U << TX_SINE_TABLE_BITS)
 #define TX_SINE_INDEX_SHIFT     (32U - TX_SINE_TABLE_BITS)
+#define TX_BASE_SINE_AMP        80U
+#define TX_MAX_SINE_AMP         126U
 
 /* USER CODE END PD */
 
@@ -92,6 +94,12 @@ static const uint32_t tx_phase_inc[4] = {
 };
 
 static const uint16_t tx_freq_hz[4] = {1500U, 2500U, 3500U, 4500U};
+static const uint8_t tx_amp_by_bits[4] = {
+  50U,             /* 1500Hz: attenuate the strong low-frequency path */
+  72U,             /* 2500Hz: moderate pre-emphasis */
+  TX_MAX_SINE_AMP, /* 3500Hz: near maximum without PWM clipping */
+  TX_MAX_SINE_AMP  /* 4500Hz: near maximum without PWM clipping */
+};
 
 static const uint8_t tx_digit_codebook[10][2] = {
   {0x00U, 0x01U}, /* 0 */
@@ -118,6 +126,7 @@ static volatile uint8_t tx_symbol_index = 0U;
 static volatile uint32_t tx_samples_left = 0U;
 static volatile uint32_t tx_phase_acc = 0U;
 static volatile uint32_t tx_current_inc = 0U;
+static volatile uint8_t tx_current_amp = TX_BASE_SINE_AMP;
 static uint8_t tx_frame[TX_FRAME_SYMBOLS];
 
 static volatile uint8_t uart_rx_byte = 0U;
@@ -147,6 +156,7 @@ static void TX_Stop(void);
 static void TX_StartTestTone(uint8_t bits);
 static void TX_SendText(const char *text);
 static const char *TX_BitsToString(uint8_t bits);
+static uint8_t TX_ScaledSineSample(uint8_t index);
 
 /* USER CODE END PFP */
 
@@ -161,6 +171,23 @@ static const char *TX_BitsToString(uint8_t bits)
 {
   static const char *bit_text[4] = {"00", "01", "10", "11"};
   return bit_text[bits & 0x03U];
+}
+
+static uint8_t TX_ScaledSineSample(uint8_t index)
+{
+  int16_t delta = (int16_t)tx_sine_table[index & (TX_SINE_TABLE_SIZE - 1U)] - (int16_t)TX_PWM_MID;
+  int16_t sample = (int16_t)TX_PWM_MID + (int16_t)((delta * (int16_t)tx_current_amp) / (int16_t)TX_BASE_SINE_AMP);
+
+  if (sample < 1)
+  {
+    sample = 1;
+  }
+  else if (sample > (int16_t)(TX_PWM_PERIOD - 1U))
+  {
+    sample = (int16_t)(TX_PWM_PERIOD - 1U);
+  }
+
+  return (uint8_t)sample;
 }
 
 static void TX_BuildFrame(uint8_t digit)
@@ -211,6 +238,7 @@ static void TX_Stop(void)
   tx_state = TX_STATE_IDLE;
   tx_samples_left = 0U;
   tx_current_inc = 0U;
+  tx_current_amp = TX_BASE_SINE_AMP;
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, TX_PWM_MID);
 }
 
@@ -224,6 +252,7 @@ static void TX_StartTestTone(uint8_t bits)
   tx_samples_left = 0U;
   tx_phase_acc = 0U;
   tx_current_inc = tx_phase_inc[bits];
+  tx_current_amp = tx_amp_by_bits[bits];
   tx_state = TX_STATE_TEST_TONE;
   tx_active = 1U;
   __enable_irq();
@@ -241,6 +270,7 @@ static void TX_LoadNextTone(void)
 
   bits = tx_frame[tx_symbol_index] & 0x03U;
   tx_current_inc = tx_phase_inc[bits];
+  tx_current_amp = tx_amp_by_bits[bits];
   tx_phase_acc = 0U;
   tx_samples_left = TX_TONE_SAMPLES;
   tx_state = TX_STATE_TONE;
@@ -307,6 +337,7 @@ int main(void)
   TX_SendText("\r\n4FSK TX ready.\r\n");
   TX_SendText("Digit frame: d0-d9, or 2-9 direct.\r\n");
   TX_SendText("Test tone: 00=1500, 01=2500, 10=3500, 11=4500, s=stop.\r\n");
+  TX_SendText("Pre-emphasis amp: 50/72/126/126.\r\n");
 
   /* USER CODE END 2 */
 
@@ -332,8 +363,8 @@ int main(void)
 
       uart_tone_pending = 0U;
       TX_StartTestTone(bits);
-      (void)snprintf(msg, sizeof(msg), "TEST %s -> %uHz continuous\r\n",
-                     TX_BitsToString(bits), tx_freq_hz[bits]);
+      (void)snprintf(msg, sizeof(msg), "TEST %s -> %uHz continuous, amp=%u\r\n",
+                     TX_BitsToString(bits), tx_freq_hz[bits], tx_amp_by_bits[bits]);
       TX_SendText(msg);
     }
 
@@ -539,7 +570,7 @@ void TX_AudioTick(void)
   if (tx_state == TX_STATE_TEST_TONE)
   {
     index = (uint8_t)(tx_phase_acc >> TX_SINE_INDEX_SHIFT);
-    sample = tx_sine_table[index & (TX_SINE_TABLE_SIZE - 1U)];
+    sample = TX_ScaledSineSample(index);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, sample);
     tx_phase_acc += tx_current_inc;
     return;
@@ -562,7 +593,7 @@ void TX_AudioTick(void)
   if (tx_state == TX_STATE_TONE)
   {
     index = (uint8_t)(tx_phase_acc >> TX_SINE_INDEX_SHIFT);
-    sample = tx_sine_table[index & (TX_SINE_TABLE_SIZE - 1U)];
+    sample = TX_ScaledSineSample(index);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, sample);
     tx_phase_acc += tx_current_inc;
   }

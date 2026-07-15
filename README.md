@@ -49,6 +49,9 @@
 - `logs/`：课程工作日志和串口调试原始记录。
 - `software/stm32_receive/`：STM32F411 接收端 CubeMX/HAL/Keil 工程。
 - `software/stm32_send/`：STM32F411 发送端 CubeMX/HAL/Keil 工程。
+- `software/stm32_first_board_tx/`：第一版板卡发送端 4-FSK 测试工程。
+- `software/stm32_first_board_rx/`：第一版板卡接收端 4-FSK 测试工程。
+- `software/stm32_second_board/`：第二版板卡收发一体 4-FSK 测试工程。
 - `software/python_tools/`：PC 端声音播放和协议测试工具。
 
 ## 引脚版本说明

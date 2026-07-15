@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #if defined(__ARMCC_VERSION)
 #include <rt_sys.h>
 #endif
@@ -121,6 +122,14 @@ typedef struct
   float second_energy;
 } FSK_DetectResult;
 
+typedef struct
+{
+  uint16_t peak_freq_hz;
+  uint16_t second_freq_hz;
+  float peak_energy;
+  float second_energy;
+} FSK_ScanResult;
+
 typedef enum
 {
   DIGIT_RX_SEARCH = 0,
@@ -143,6 +152,10 @@ typedef enum
 #define ADC_DMA_BUFFER_SAMPLES    (FSK_SYMBOL_SAMPLES * 2U)
 
 #define FSK_FREQ_COUNT            4U
+#define FSK_RX_FREQ_00_HZ         1500U
+#define FSK_RX_FREQ_01_HZ         2500U
+#define FSK_RX_FREQ_10_HZ         3500U
+#define FSK_RX_FREQ_11_HZ         4500U
 #define FSK_ENERGY_THRESHOLD      5000000.0f
 #define FSK_RATIO_THRESHOLD       1.3f
 #define FSK_NOISE_MULTIPLIER      3.0f
@@ -150,6 +163,13 @@ typedef enum
 #define OLED_IDLE_UPDATE_MS       1000U
 #define DEBUG_UART_ENABLE         1U
 #define UART_IDLE_LOG_MS          1000U
+#define FSK_SCAN_DEBUG_ENABLE     0U
+#define FSK_SCAN_MIN_HZ           800U
+#define FSK_SCAN_MAX_HZ           6000U
+#define FSK_SCAN_STEP_HZ          25U
+#define FSK_SCAN_LOG_MS           500U
+#define FSK_SCAN_BIN_COUNT        (((FSK_SCAN_MAX_HZ - FSK_SCAN_MIN_HZ) / FSK_SCAN_STEP_HZ) + 1U)
+#define FSK_PI                    3.14159265358979323846f
 #define DIGIT_STABLE_WINDOWS      2U
 #define DIGIT_GAP_INVALID_WINDOWS 2U
 #define DIGIT_FRAME_TIMEOUT_MS    5000U
@@ -182,7 +202,12 @@ static uint16_t adc_dma_buf[ADC_DMA_BUFFER_SAMPLES];
 static volatile uint8_t symbol_ready = 0U;
 static volatile uint16_t symbol_start_index = 0U;
 
-static const uint16_t fsk_freqs_hz[FSK_FREQ_COUNT] = {1500U, 2500U, 3500U, 4500U};
+static const uint16_t fsk_freqs_hz[FSK_FREQ_COUNT] = {
+  FSK_RX_FREQ_00_HZ,
+  FSK_RX_FREQ_01_HZ,
+  FSK_RX_FREQ_10_HZ,
+  FSK_RX_FREQ_11_HZ
+};
 static const uint8_t fsk_bits[FSK_FREQ_COUNT] = {0x00U, 0x01U, 0x02U, 0x03U};
 static const uint8_t digit_codebook[10][2] = {
   {0x00U, 0x01U}, /* 0 */
@@ -200,6 +225,11 @@ static const uint8_t digit_preamble[DIGIT_PREAMBLE_LEN] = {0x00U, 0x01U, 0x02U, 
 static const uint8_t digit_start[DIGIT_START_LEN] = {0x01U, 0x02U};
 static const uint8_t digit_end[DIGIT_END_LEN] = {0x02U, 0x03U};
 static float fsk_goertzel_coeffs[FSK_FREQ_COUNT];
+#if FSK_SCAN_DEBUG_ENABLE
+static uint16_t fsk_scan_freqs_hz[FSK_SCAN_BIN_COUNT];
+static float fsk_scan_coeffs[FSK_SCAN_BIN_COUNT];
+static FSK_ScanResult fsk_last_scan = {0};
+#endif
 static uint16_t oled_i2c_addr = OLED_I2C_ADDR_3C;
 static uint8_t oled_ready = 0U;
 static float fsk_noise_floor[FSK_FREQ_COUNT] = {
@@ -220,6 +250,7 @@ static uint8_t digit_frame_error = 0U;
 static uint32_t digit_frame_tick = 0U;
 static uint8_t digit_last_valid = 0U;
 static uint8_t digit_last_value = 0U;
+static uint32_t digit_display_seq = 0U;
 static uint8_t uart_log_event = 0U;
 static const char *uart_log_text = "";
 static uint8_t uart_log_digit_valid = 0U;
@@ -239,8 +270,13 @@ static void MX_TIM2_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void FSK_Init(void);
+static float FSK_WindowMean(const uint16_t *samples, uint16_t len);
+static float Goertzel_EnergyWithMean(const uint16_t *samples, uint16_t len, float coeff, float mean);
 static float Goertzel_Energy(const uint16_t *samples, uint16_t len, float coeff);
 static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len);
+#if FSK_SCAN_DEBUG_ENABLE
+static FSK_ScanResult FSK_ScanPeak(const uint16_t *samples, uint16_t len);
+#endif
 static void FSK_ProcessSymbol(const uint16_t *samples);
 static const char *FSK_BitsToString(uint8_t bits);
 static void DigitRx_Process(const FSK_DetectResult *result, uint32_t now);
@@ -267,30 +303,38 @@ static void StatusLed_Update(void);
 /* USER CODE BEGIN 0 */
 static void FSK_Init(void)
 {
-  /*
-   * Goertzel coefficient = 2*cos(2*pi*f/Fs).
-   * Fs is fixed at 16000 Hz for this first receiver version.
-   */
-  fsk_goertzel_coeffs[0] = 1.6629392f;   /* 1500 Hz */
-  fsk_goertzel_coeffs[1] = 1.1111405f;   /* 2500 Hz */
-  fsk_goertzel_coeffs[2] = 0.3901806f;   /* 3500 Hz */
-  fsk_goertzel_coeffs[3] = -0.3901806f;  /* 4500 Hz */
+  for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+  {
+    fsk_goertzel_coeffs[i] = 2.0f * cosf((2.0f * FSK_PI * (float)fsk_freqs_hz[i]) / (float)FSK_FS_HZ);
+  }
+
+#if FSK_SCAN_DEBUG_ENABLE
+  for (uint16_t i = 0U; i < FSK_SCAN_BIN_COUNT; i++)
+  {
+    uint16_t freq = (uint16_t)(FSK_SCAN_MIN_HZ + (i * FSK_SCAN_STEP_HZ));
+    fsk_scan_freqs_hz[i] = freq;
+    fsk_scan_coeffs[i] = 2.0f * cosf((2.0f * FSK_PI * (float)freq) / (float)FSK_FS_HZ);
+  }
+#endif
 }
 
-static float Goertzel_Energy(const uint16_t *samples, uint16_t len, float coeff)
+static float FSK_WindowMean(const uint16_t *samples, uint16_t len)
 {
   uint32_t sum = 0U;
-  float mean;
-  float s0 = 0.0f;
-  float s1 = 0.0f;
-  float s2 = 0.0f;
 
   for (uint16_t i = 0U; i < len; i++)
   {
     sum += samples[i];
   }
 
-  mean = (float)sum / (float)len;
+  return (float)sum / (float)len;
+}
+
+static float Goertzel_EnergyWithMean(const uint16_t *samples, uint16_t len, float coeff, float mean)
+{
+  float s0 = 0.0f;
+  float s1 = 0.0f;
+  float s2 = 0.0f;
 
   for (uint16_t i = 0U; i < len; i++)
   {
@@ -301,6 +345,11 @@ static float Goertzel_Energy(const uint16_t *samples, uint16_t len, float coeff)
   }
 
   return (s1 * s1) + (s2 * s2) - (coeff * s1 * s2);
+}
+
+static float Goertzel_Energy(const uint16_t *samples, uint16_t len, float coeff)
+{
+  return Goertzel_EnergyWithMean(samples, len, coeff, FSK_WindowMean(samples, len));
 }
 
 static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len)
@@ -336,6 +385,8 @@ static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len)
 
   result.max_energy = energies[max_index];
   result.second_energy = energies[second_index];
+  result.freq_hz = fsk_freqs_hz[max_index];
+  result.bits = fsk_bits[max_index];
 
   for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
   {
@@ -363,23 +414,53 @@ static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len)
       (result.max_energy > (fsk_noise_floor[max_index] * FSK_NOISE_MULTIPLIER)))
   {
     result.valid = 1U;
-    result.freq_hz = fsk_freqs_hz[max_index];
-    result.bits = fsk_bits[max_index];
   }
 
   return result;
 }
 
+#if FSK_SCAN_DEBUG_ENABLE
+static FSK_ScanResult FSK_ScanPeak(const uint16_t *samples, uint16_t len)
+{
+  FSK_ScanResult result = {0};
+  float mean = FSK_WindowMean(samples, len);
+
+  for (uint16_t i = 0U; i < FSK_SCAN_BIN_COUNT; i++)
+  {
+    float energy = Goertzel_EnergyWithMean(samples, len, fsk_scan_coeffs[i], mean);
+
+    if (energy > result.peak_energy)
+    {
+      result.second_energy = result.peak_energy;
+      result.second_freq_hz = result.peak_freq_hz;
+      result.peak_energy = energy;
+      result.peak_freq_hz = fsk_scan_freqs_hz[i];
+    }
+    else if (energy > result.second_energy)
+    {
+      result.second_energy = energy;
+      result.second_freq_hz = fsk_scan_freqs_hz[i];
+    }
+  }
+
+  return result;
+}
+#endif
+
 static void FSK_ProcessSymbol(const uint16_t *samples)
 {
   FSK_DetectResult result = FSK_DetectSymbol(samples, FSK_SYMBOL_SAMPLES);
-  static uint32_t last_oled_update = 0U;
+#if FSK_SCAN_DEBUG_ENABLE
+  static uint32_t last_scan_log = 0U;
+#else
   static uint32_t last_idle_log = 0U;
-  static uint8_t last_digit_valid = 0U;
-  static uint8_t last_digit_value = 0U;
-  static uint8_t last_frame_error = 0U;
+#endif
+  static uint32_t last_oled_digit_seq = 0U;
   uint32_t now = HAL_GetTick();
-  uint8_t oled_update_now = 0U;
+
+#if FSK_SCAN_DEBUG_ENABLE
+  fsk_last_scan = FSK_ScanPeak(samples, FSK_SYMBOL_SAMPLES);
+#endif
 
   DigitRx_Process(&result, now);
 
@@ -426,6 +507,25 @@ static void FSK_ProcessSymbol(const uint16_t *samples)
     uart_log_expected_bits = DIGIT_NO_SYMBOL;
     uart_log_got_bits = DIGIT_NO_SYMBOL;
   }
+#if FSK_SCAN_DEBUG_ENABLE
+  if ((now - last_scan_log) >= FSK_SCAN_LOG_MS)
+  {
+    uint32_t peak_k = (uint32_t)(fsk_last_scan.peak_energy / 1000.0f);
+    uint32_t second_k = (uint32_t)(fsk_last_scan.second_energy / 1000.0f);
+    uint32_t cand_k = (uint32_t)(result.max_energy / 1000.0f);
+
+    last_scan_log = now;
+    printf("scan: PK=%uHz E=%luK, S=%uHz E2=%luK, cand=%uHz->%s %s C=%luK\r\n",
+           fsk_last_scan.peak_freq_hz,
+           (unsigned long)peak_k,
+           fsk_last_scan.second_freq_hz,
+           (unsigned long)second_k,
+           result.freq_hz,
+           FSK_BitsToString(result.bits),
+           (result.valid != 0U) ? "valid" : "invalid",
+           (unsigned long)cand_k);
+  }
+#else
   else if ((result.valid == 0U) && ((now - last_idle_log) >= UART_IDLE_LOG_MS))
   {
     last_idle_log = now;
@@ -434,25 +534,11 @@ static void FSK_ProcessSymbol(const uint16_t *samples)
            (unsigned int)result.second_energy);
   }
 #endif
+#endif
 
-  if ((digit_last_valid != last_digit_valid) ||
-      ((digit_last_valid != 0U) && (digit_last_value != last_digit_value)) ||
-      (digit_frame_error != last_frame_error))
+  if (digit_display_seq != last_oled_digit_seq)
   {
-    oled_update_now = 1U;
-  }
-  else if ((digit_rx_state == DIGIT_RX_SEARCH) &&
-           ((now - last_oled_update) >= OLED_IDLE_UPDATE_MS))
-  {
-    oled_update_now = 1U;
-  }
-
-  if (oled_update_now != 0U)
-  {
-    last_oled_update = now;
-    last_digit_valid = digit_last_valid;
-    last_digit_value = digit_last_value;
-    last_frame_error = digit_frame_error;
+    last_oled_digit_seq = digit_display_seq;
     OLED_PrintDetected(&result);
   }
 }
@@ -486,6 +572,7 @@ static void DigitRx_LogDigit(uint8_t digit)
   DigitRx_LogEvent("digit_ok");
   uart_log_digit_valid = 1U;
   uart_log_digit_value = digit;
+  digit_display_seq++;
 }
 
 static void DigitRx_Process(const FSK_DetectResult *result, uint32_t now)
@@ -934,6 +1021,25 @@ static const uint8_t *OLED_Font5x7(char ch)
 static void OLED_PrintDetected(const FSK_DetectResult *result)
 {
   char line[22];
+
+#if FSK_SCAN_DEBUG_ENABLE
+  uint32_t peak_k = (uint32_t)(fsk_last_scan.peak_energy / 1000.0f);
+
+  OLED_Clear();
+  OLED_PrintAt(0U, 0U, "FSK SCAN");
+
+  (void)snprintf(line, sizeof(line), "PK %uHz", fsk_last_scan.peak_freq_hz);
+  OLED_PrintAt(0U, 2U, line);
+
+  (void)snprintf(line, sizeof(line), "E %luK", (unsigned long)peak_k);
+  OLED_PrintAt(0U, 4U, line);
+
+  (void)snprintf(line, sizeof(line), "C %uHz %s %c",
+                 result->freq_hz,
+                 FSK_BitsToString(result->bits),
+                 (result->valid != 0U) ? 'V' : '-');
+  OLED_PrintAt(0U, 6U, line);
+#else
   uint32_t max_k = (uint32_t)(result->max_energy / 1000.0f);
   uint32_t second_k = (uint32_t)(result->second_energy / 1000.0f);
 
@@ -976,6 +1082,7 @@ static void OLED_PrintDetected(const FSK_DetectResult *result)
 
   (void)snprintf(line, sizeof(line), "SEC %uK", (unsigned int)second_k);
   OLED_PrintAt(0U, 6U, line);
+#endif
 }
 
 static void StatusLed_Update(void)
@@ -1034,6 +1141,8 @@ int main(void)
   printf("\r\n4-FSK receiver start\r\n");
   printf("ADC1_IN1 PA1, Fs=%uHz, symbol=%ums, samples=%u\r\n",
          FSK_FS_HZ, FSK_SYMBOL_MS, FSK_SYMBOL_SAMPLES);
+  printf("freq: 00=%uHz 01=%uHz 10=%uHz 11=%uHz, frame: preamble/start/data/check/end\r\n",
+         FSK_RX_FREQ_00_HZ, FSK_RX_FREQ_01_HZ, FSK_RX_FREQ_10_HZ, FSK_RX_FREQ_11_HZ);
 #endif
 
   if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_dma_buf, ADC_DMA_BUFFER_SAMPLES) != HAL_OK)
