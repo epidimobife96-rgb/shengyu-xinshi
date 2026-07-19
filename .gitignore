@@ -3,6 +3,7 @@
 *.d
 *.axf
 *.hex
+!software/stm32_second_board/MDK-ARM/test2/test2.hex
 *.map
 *.htm
 *.lnp

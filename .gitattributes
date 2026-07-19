@@ -1,0 +1,24 @@
+* text=auto
+
+*.c text eol=lf
+*.h text eol=lf
+*.s text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.py text eol=lf
+*.ioc text eol=lf
+*.uvprojx text eol=lf
+*.uvoptx text eol=lf
+*.hex text eol=lf
+
+*.pdf binary
+*.docx binary
+*.zip binary
+*.epro2 binary
+*.eprj2 binary
+*.schdoc binary
+*.pcbdoc binary
+*.ms14 binary
+*.png binary
+*.jpg binary
+*.jpeg binary

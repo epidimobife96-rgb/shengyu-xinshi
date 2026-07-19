@@ -116,6 +116,15 @@ typedef struct
   uint16_t adc_max;
 } FSK_DetectResult;
 
+typedef struct
+{
+  uint16_t fsk_index;
+  uint8_t source;
+  uint8_t selected_bits;
+  float confidence;
+  float energy[4U];
+} RxDecisionDiagnostic;
+
 typedef enum
 {
   MSG_RX_SEARCH = 0,
@@ -142,17 +151,38 @@ typedef enum
 
 typedef enum
 {
+  COMM_MODE_UNSELECTED = 0,
+  COMM_MODE_STANDARD,
+  COMM_MODE_MULTI_NODE,
+  COMM_MODE_HIDDEN
+} CommunicationMode;
+
+typedef enum
+{
   TX_FRAME_TONE = 0,
   TX_FRAME_GAP
 } TX_FramePart;
+
+typedef enum
+{
+  MESSAGE_PAYLOAD_OK = 0,
+  MESSAGE_PAYLOAD_CRC_FAIL,
+  MESSAGE_PAYLOAD_DATA_AFTER_PAD,
+  MESSAGE_PAYLOAD_INVALID_CODE,
+  MESSAGE_PAYLOAD_EMPTY
+} MessagePayloadStatus;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define FSK_FS_HZ                 16000U
+#define FSK_NORMAL_FS_HZ          16000U
+#define FSK_HIDDEN_FS_HZ          20000U
 #define FSK_SYMBOL_MS             20U
-#define FSK_SYMBOL_SAMPLES        ((FSK_FS_HZ * FSK_SYMBOL_MS) / 1000U)
-#define ADC_DMA_BUFFER_SAMPLES    (FSK_SYMBOL_SAMPLES * 2U)
+#define FSK_NORMAL_SYMBOL_SAMPLES ((FSK_NORMAL_FS_HZ * FSK_SYMBOL_MS) / 1000U)
+#define FSK_HIDDEN_SYMBOL_SAMPLES ((FSK_HIDDEN_FS_HZ * FSK_SYMBOL_MS) / 1000U)
+#define FSK_MAX_SYMBOL_SAMPLES    FSK_HIDDEN_SYMBOL_SAMPLES
+#define ADC_DMA_BUFFER_SAMPLES    (FSK_MAX_SYMBOL_SAMPLES * 2U)
+#define TIM2_COUNTER_CLOCK_HZ     16000000U
 
 #define FSK_FREQ_COUNT            5U
 #define FSK_DATA_FREQ_COUNT       4U
@@ -161,6 +191,14 @@ typedef enum
 #define FSK_RX_FREQ_01_HZ         2500U
 #define FSK_RX_FREQ_10_HZ         3500U
 #define FSK_RX_FREQ_11_HZ         4500U
+#define FSK_HIGH_FREQ_00_HZ       6400U
+#define FSK_HIGH_FREQ_01_HZ       6550U
+#define FSK_HIGH_SYNC_FREQ_HZ     6700U
+#define FSK_HIGH_FREQ_10_HZ       6850U
+#define FSK_HIGH_FREQ_11_HZ       7000U
+#define TX_HIGH_PROFILE_AMP       96U
+/* Hidden mode uses the restored high-frequency profile. */
+#define FSK_HIGH_PROFILE_ENABLE   1U
 #define FSK_SYNC_SYMBOL           0x04U
 #define FSK_ENERGY_THRESHOLD      5000000.0f
 #define FSK_RATIO_THRESHOLD       1.3f
@@ -182,13 +220,13 @@ typedef enum
 #define START_STABLE_WINDOWS      2U
 #define DIGIT_GAP_INVALID_WINDOWS 1U
 #define RX_SAME_SYMBOL_REACCEPT_MS 65U
-#define DIGIT_FRAME_TIMEOUT_MS    20000U
+#define DIGIT_FRAME_TIMEOUT_MS    22000U
 #define START_SEQUENCE_TIMEOUT_MS 400U
 #define DIGIT_NO_SYMBOL           0xFFU
 #define MSG_PREAMBLE_LEN          4U
 #define MSG_START_LEN             2U
 #define MSG_END_LEN               2U
-#define RS_DATA_SYMBOLS           24U
+#define RS_DATA_SYMBOLS           25U
 #define RS_PARITY_SYMBOLS         10U
 #define RS_CODEWORD_SYMBOLS       (RS_DATA_SYMBOLS + RS_PARITY_SYMBOLS)
 #define RS_CORRECTABLE_SYMBOLS    (RS_PARITY_SYMBOLS / 2U)
@@ -201,7 +239,10 @@ typedef enum
 #define RS_FIELD_ORDER            63U
 #define RS_PRIMITIVE_POLY         0x43U
 #define RS_PAD_VALUE              0x3FU
-#define MESSAGE_MAX_LEN           RS_TOTAL_DATA_SYMBOLS
+#define MESSAGE_CRC_SYMBOLS       2U
+#define MESSAGE_MAX_LEN           (RS_TOTAL_DATA_SYMBOLS - MESSAGE_CRC_SYMBOLS)
+#define MESSAGE_CRC12_POLY        0x080FU
+#define MESSAGE_CRC12_MASK        0x0FFFU
 #define MESSAGE_CODE_INVALID      0xFFU
 #define TEXT_TAP_TIMEOUT_MS       800U
 
@@ -213,10 +254,10 @@ typedef enum
 #define TX_DAC_COMMAND_ACTIVE_1X  0x3000U
 #define TX_DAC_CODE_SHIFT         4U
 #define TX_DAC_MID_CODE           ((uint16_t)TX_PWM_MID << TX_DAC_CODE_SHIFT)
-#define RX_PGA_GAIN_CODE          0x04U
-#define RX_PGA_GAIN_VALUE         8U
+#define RX_PGA_DEFAULT_GAIN_CODE  0x07U  /* MCP6S21 gain code 7 = x32 */
+#define RX_PGA_MULTI_GAIN_CODE    0x01U  /* MCP6S21 gain code 1 = x2 */
 #define TX_TONE_MS                60U
-#define TX_GAP_MS                 10U
+#define TX_GAP_MS                 9U
 #define TX_STEP_MS                (TX_TONE_MS + TX_GAP_MS)
 #define TX_REPEAT_COUNT           1U
 #define TX_FRAME_SYMBOLS_PER_REPEAT \
@@ -234,30 +275,51 @@ typedef enum
 #define RS_SLOT_CAPTURE_END_MS    (RS_MARKER_INTERVAL_MS - 20U)
 #define RS_SOFT_CAPTURE_START_MS  60U
 #define RS_VOTE_RATIO_CAP         8.0f
+#define RX_DIAG_WORST_COUNT       8U
+#define RX_DECISION_VOTE          0U
+#define RX_DECISION_NEAREST       1U
+#define RX_DECISION_SOFT          2U
+#define RX_DECISION_ERASURE       3U
 
-#if TX_FRAME_DURATION_MS >= 20000U
-#error "TX message frame must remain shorter than 20 seconds"
+#if TX_FRAME_DURATION_MS > 20100U
+#error "TX message frame must remain no longer than 20.10 seconds"
 #endif
 
-#define CALIBRATION_TONE_MS              1000U
+#define CALIBRATION_STAGE_MS             1000U
+#define CALIBRATION_PASS_COUNT            2U
+#define CALIBRATION_BOUNDARY_MS            300U
+#define CALIBRATION_BOUNDARY_STABLE_WINDOWS 5U
+#define CALIBRATION_INTERPASS_GAP_MS      2000U
+#define CALIBRATION_GAP_DETECT_MS         1200U
 #define CALIBRATION_TX_GUARD_MS          300U
-#define CALIBRATION_TONE_SAMPLES         ((TX_AUDIO_FS_HZ * CALIBRATION_TONE_MS) / 1000U)
+#define CALIBRATION_STAGE_SAMPLES        ((TX_AUDIO_FS_HZ * CALIBRATION_STAGE_MS) / 1000U)
+#define CALIBRATION_BOUNDARY_SAMPLES     ((TX_AUDIO_FS_HZ * CALIBRATION_BOUNDARY_MS) / 1000U)
+#define CALIBRATION_INTERPASS_GAP_SAMPLES ((TX_AUDIO_FS_HZ * CALIBRATION_INTERPASS_GAP_MS) / 1000U)
 #define CALIBRATION_TX_GUARD_SAMPLES     ((TX_AUDIO_FS_HZ * CALIBRATION_TX_GUARD_MS) / 1000U)
 #define CALIBRATION_STABLE_WINDOWS       5U
 #define CALIBRATION_ENERGY_WINDOWS       12U
 #define CALIBRATION_LOST_WINDOWS_MAX     3U
 #define CALIBRATION_PROGRESS_TIMEOUT_MS  2500U
 #define CALIBRATION_SCALE_MIN            0.005f
-#define PREAMBLE_ENERGY_SCALE_MIN        0.005f
-#define PREAMBLE_SCALE_NEW_WEIGHT        0.50f
+#define RX_PGA_ADC_LOW_PEAK              350U
+#define RX_PGA_ADC_HIGH_PEAK             1650U
+#define RX_PGA_ADC_CLIP_MARGIN            128U
+#define RX_PGA_AGC_SETTLE_MS               60U
+#define RX_PGA_AGC_HIGH_WINDOWS             4U
+#define RX_PGA_AGC_CLIP_WINDOWS             3U
+#define RX_PGA_AGC_LOW_WINDOWS              5U
+#define RX_PGA_AGC_TONE_RATIO              1.8f
 #define PREAMBLE_RECOVERY_ENERGY_MIN     5000000.0f
+#define PREAMBLE_FRAME_SCALE_MIN_CORR     0.50f
+#define PREAMBLE_FRAME_SCALE_MAX_CORR     2.00f
+#define PREAMBLE_FRAME_MAX_4500_TO_3500   2.50f
 #define PREAMBLE_RECOVERY_01_END_MS       70U
 #define PREAMBLE_RECOVERY_10_START_MS     50U
 #define PREAMBLE_RECOVERY_10_END_MS      140U
 #define PREAMBLE_RECOVERY_11_START_MS    120U
 #define PREAMBLE_RECOVERY_11_END_MS      210U
 #define PREAMBLE_RECOVERY_START0_START_MS 190U
-#define PREAMBLE_RECOVERY_START0_END_MS  300U
+#define PREAMBLE_RECOVERY_START0_END_MS  255U
 #define PREAMBLE_RECOVERY_START1_START_MS 260U
 #define PREAMBLE_RECOVERY_START1_END_MS  330U
 #define PREAMBLE_RECOVERY_MARKER_MIN_MS  300U
@@ -267,8 +329,8 @@ typedef enum
 #define KEYPAD_COLS               4U
 #define KEYPAD_SCAN_MS            20U
 #define KEYPAD_DEBOUNCE_SCANS     2U
+#define KEYPAD_LONG_PRESS_MS      800U
 #define KEY_NONE                  0U
-#define POWER_OFF_HOLD_MS         600U
 
 #define OLED_I2C_ADDR_3C          (0x3CU << 1)
 #define OLED_I2C_ADDR_3D          (0x3DU << 1)
@@ -281,6 +343,10 @@ typedef enum
 #define MESSAGE_STORE_FLASH_END     0x08080000UL
 #define MESSAGE_STORE_MAGIC         0x3147534DUL
 #define MESSAGE_STORE_COMMIT        0xA55AC33CUL
+#define MESSAGE_STORE_LENGTH_MASK   0x000000FFUL
+#define MESSAGE_STORE_SOURCE_SHIFT  8U
+#define MESSAGE_STORE_DEST_SHIFT    10U
+#define MESSAGE_STORE_ROUTE_MASK    0x00000F00UL
 #define RX_COMPLETE_LED_ON_MS       3000U
 /* USER CODE END PD */
 
@@ -308,14 +374,34 @@ typedef struct
 {
   uint32_t sequence;
   uint8_t len;
+  uint8_t source;
+  uint8_t destination;
   char text[MESSAGE_MAX_LEN + 1U];
 } StoredMessage;
 
 static uint16_t adc_dma_buf[ADC_DMA_BUFFER_SAMPLES];
 static volatile uint8_t symbol_ready = 0U;
 static volatile uint16_t symbol_start_index = 0U;
+static uint32_t fsk_sample_rate_hz = FSK_NORMAL_FS_HZ;
+static uint16_t fsk_symbol_samples = FSK_NORMAL_SYMBOL_SAMPLES;
 
-static const uint16_t fsk_tx_freqs_hz[FSK_FREQ_COUNT] = {
+static const uint16_t fsk_normal_freqs_hz[FSK_FREQ_COUNT] = {
+  FSK_RX_FREQ_00_HZ,
+  FSK_RX_FREQ_01_HZ,
+  FSK_RX_FREQ_10_HZ,
+  FSK_RX_FREQ_11_HZ,
+  FSK_SYNC_FREQ_HZ
+};
+#if FSK_HIGH_PROFILE_ENABLE != 0U
+static const uint16_t fsk_high_freqs_hz[FSK_FREQ_COUNT] = {
+  FSK_HIGH_FREQ_00_HZ,
+  FSK_HIGH_FREQ_01_HZ,
+  FSK_HIGH_FREQ_10_HZ,
+  FSK_HIGH_FREQ_11_HZ,
+  FSK_HIGH_SYNC_FREQ_HZ
+};
+#endif
+static uint16_t fsk_tx_freqs_hz[FSK_FREQ_COUNT] = {
   FSK_RX_FREQ_00_HZ,
   FSK_RX_FREQ_01_HZ,
   FSK_RX_FREQ_10_HZ,
@@ -323,12 +409,15 @@ static const uint16_t fsk_tx_freqs_hz[FSK_FREQ_COUNT] = {
   FSK_SYNC_FREQ_HZ
 };
 static uint16_t fsk_rx_freqs_hz[FSK_FREQ_COUNT];
+#if FSK_HIGH_PROFILE_ENABLE != 0U
+static uint8_t fsk_high_profile_enabled = 0U;
+#endif
 static const uint8_t fsk_bits[FSK_FREQ_COUNT] = {0x00U, 0x01U, 0x02U, 0x03U, FSK_SYNC_SYMBOL};
 static const uint8_t msg_preamble[MSG_PREAMBLE_LEN] = {0x00U, 0x01U, 0x02U, 0x03U};
-static const uint8_t msg_start[MSG_START_LEN] = {0x01U, 0x02U};
 static const uint8_t msg_end[MSG_END_LEN] = {0x02U, 0x03U};
 static float fsk_goertzel_coeffs[FSK_FREQ_COUNT];
 static float fsk_energy_scale[FSK_FREQ_COUNT];
+static float calibration_energy_scale[FSK_DATA_FREQ_COUNT];
 
 static float calibration_energy[FSK_DATA_FREQ_COUNT];
 static float calibration_energy_sum = 0.0f;
@@ -338,8 +427,21 @@ static uint8_t calibration_stage = 0U;
 static uint8_t calibration_stable_windows = 0U;
 static uint8_t calibration_capture_active = 0U;
 static uint8_t calibration_complete = 0U;
+static uint8_t calibration_failed = 0U;
 static uint32_t calibration_progress_tick = 0U;
-static uint8_t preamble_scale_initialized = 0U;
+static uint8_t calibration_pass = 0U;
+static uint8_t calibration_coarse_activity = 0U;
+static uint8_t calibration_boundary_windows = 0U;
+static uint32_t calibration_coarse_last_signal_tick = 0U;
+static uint16_t calibration_adc_min_seen = 0xFFFFU;
+static uint16_t calibration_adc_max_seen = 0U;
+static uint16_t calibration_adc_mean_last = 2048U;
+static uint32_t rx_pga_agc_last_adjust_tick = 0U;
+static uint8_t rx_pga_agc_high_windows = 0U;
+static uint8_t rx_pga_agc_clip_windows = 0U;
+static uint8_t rx_pga_agc_low_windows = 0U;
+static const uint8_t rx_pga_gain_values[8U] = {1U, 2U, 4U, 5U, 8U, 10U, 16U, 32U};
+static uint8_t rx_pga_gain_code = RX_PGA_DEFAULT_GAIN_CODE;
 
 static uint16_t oled_i2c_addr = OLED_I2C_ADDR_3C;
 static uint8_t oled_ready = 0U;
@@ -371,11 +473,19 @@ static uint8_t msg_preamble_recovery_active = 0U;
 static uint32_t msg_preamble_recovery_tick = 0U;
 static float msg_preamble_recovery_energy[FSK_DATA_FREQ_COUNT];
 static float msg_preamble_recovery_start_energy[MSG_START_LEN];
+static uint8_t msg_preamble_recovery_start_bits[MSG_START_LEN];
+static uint8_t local_node_id = 0U;
+static uint8_t tx_destination_id = 0U;
+static uint8_t msg_rx_source_id = 0U;
+static uint8_t msg_rx_destination_id = 0U;
 static uint8_t msg_rs_symbol_index = 0U;
 static uint8_t msg_rs_fsk_index = 0U;
 static uint8_t msg_rs_symbol = 0U;
 static uint8_t msg_rs_codeword[RS_TOTAL_CODEWORD_SYMBOLS];
+static uint8_t msg_rs_codeword_erased[RS_TOTAL_CODEWORD_SYMBOLS];
+static float msg_rs_codeword_reliability[RS_TOTAL_CODEWORD_SYMBOLS];
 static uint8_t msg_rs_current_erased = 0U;
+static float msg_rs_current_reliability = RS_VOTE_RATIO_CAP;
 static uint8_t msg_rs_erasure_count = 0U;
 static uint8_t msg_soft_fallback_count = 0U;
 static uint8_t msg_vote_override_count = 0U;
@@ -384,14 +494,23 @@ static uint8_t msg_capture_bits[RS_FSK_SYMBOLS_PER_SYMBOL];
 static uint8_t msg_capture_valid[RS_FSK_SYMBOLS_PER_SYMBOL];
 static uint8_t msg_capture_distance[RS_FSK_SYMBOLS_PER_SYMBOL];
 static float msg_capture_scores[RS_FSK_SYMBOLS_PER_SYMBOL][4];
+static float msg_capture_best_ratio[RS_FSK_SYMBOLS_PER_SYMBOL][FSK_DATA_FREQ_COUNT];
+static float msg_capture_best_energy[RS_FSK_SYMBOLS_PER_SYMBOL][FSK_DATA_FREQ_COUNT][FSK_DATA_FREQ_COUNT];
 static uint8_t msg_soft_bits[RS_FSK_SYMBOLS_PER_SYMBOL];
 static uint8_t msg_soft_valid[RS_FSK_SYMBOLS_PER_SYMBOL];
 static float msg_soft_score[RS_FSK_SYMBOLS_PER_SYMBOL];
+static float msg_soft_ratio[RS_FSK_SYMBOLS_PER_SYMBOL];
+static float msg_soft_energy[RS_FSK_SYMBOLS_PER_SYMBOL][FSK_DATA_FREQ_COUNT];
+static RxDecisionDiagnostic msg_worst_decisions[RX_DIAG_WORST_COUNT];
+static uint8_t msg_worst_decision_count = 0U;
+static uint8_t msg_low_confidence_count = 0U;
 static uint32_t msg_frame_tick = 0U;
 static char rx_message[MESSAGE_MAX_LEN + 1U];
 static uint8_t rx_message_len = 0U;
 static uint8_t rx_message_valid = 0U;
 static uint8_t rx_rs_corrected = 0U;
+static uint8_t rx_message_source_id = 0U;
+static uint8_t rx_message_destination_id = 0U;
 static uint32_t rx_display_seq = 0U;
 static uint32_t uart_symbol_seq = 0U;
 
@@ -402,6 +521,8 @@ static uint32_t message_store_next_sequence = 1U;
 static uint32_t message_store_write_address = MESSAGE_STORE_FLASH_START;
 static uint8_t message_store_pending = 0U;
 static uint8_t message_store_pending_len = 0U;
+static uint8_t message_store_pending_source = 0U;
+static uint8_t message_store_pending_destination = 0U;
 static char message_store_pending_text[MESSAGE_MAX_LEN + 1U];
 static uint8_t message_store_last_save_failed = 0U;
 
@@ -422,7 +543,23 @@ static const uint8_t tx_sine_table[TX_SINE_TABLE_SIZE] = {
     0,   0,   2,   5,  10,  15,  21,  29,
    37,  47,  57,  67,  79,  90, 103, 115
 };
-static const uint8_t tx_fsk_amp[FSK_FREQ_COUNT] = {
+#if FSK_HIGH_PROFILE_ENABLE != 0U
+static const uint8_t tx_normal_fsk_amp[FSK_FREQ_COUNT] = {
+  30U,
+  72U,
+  TX_MAX_SINE_AMP,
+  TX_MAX_SINE_AMP,
+  60U
+};
+static const uint8_t tx_high_fsk_amp[FSK_FREQ_COUNT] = {
+  TX_HIGH_PROFILE_AMP,
+  TX_HIGH_PROFILE_AMP,
+  TX_HIGH_PROFILE_AMP,
+  TX_HIGH_PROFILE_AMP,
+  TX_HIGH_PROFILE_AMP
+};
+#endif
+static uint8_t tx_fsk_amp[FSK_FREQ_COUNT] = {
   30U,
   72U,
   TX_MAX_SINE_AMP,
@@ -430,11 +567,11 @@ static const uint8_t tx_fsk_amp[FSK_FREQ_COUNT] = {
   60U
 };
 static const uint8_t tx_preamble_symbols[MSG_PREAMBLE_LEN] = {0x00U, 0x01U, 0x02U, 0x03U};
-static const uint8_t tx_start_symbols[MSG_START_LEN] = {0x01U, 0x02U};
 static const uint8_t tx_end_symbols[MSG_END_LEN] = {0x02U, 0x03U};
 
 static volatile TX_Mode tx_mode = TX_MODE_IDLE;
 static AppMode app_mode = APP_MODE_RX;
+static CommunicationMode communication_mode = COMM_MODE_UNSELECTED;
 static volatile TX_FramePart tx_frame_part = TX_FRAME_TONE;
 static volatile uint32_t tx_phase = 0U;
 static volatile uint32_t tx_phase_inc = 0U;
@@ -446,6 +583,9 @@ static volatile uint16_t tx_frame_len = 0U;
 static volatile uint8_t tx_done_pending = 0U;
 static volatile uint8_t tx_done_is_calibration = 0U;
 static volatile uint8_t tx_calibration_stage = 0U;
+static volatile uint8_t tx_calibration_pass = 0U;
+static volatile uint8_t tx_calibration_boundary_active = 0U;
+static volatile uint32_t tx_calibration_stage_sample_count = 0U;
 static volatile uint8_t tx_calibration_sent = 0U;
 static uint8_t tx_frame_symbols[TX_FRAME_MAX_SYMBOLS];
 static uint8_t tx_last_valid = 0U;
@@ -468,6 +608,9 @@ static uint8_t keypad_last_raw = KEY_NONE;
 static uint8_t keypad_stable_key = KEY_NONE;
 static uint8_t keypad_debounce_count = 0U;
 static uint32_t keypad_last_scan_ms = 0U;
+static uint32_t keypad_press_start_ms = 0U;
+static uint8_t keypad_defer_short_press = 0U;
+static uint8_t keypad_long_press_handled = 0U;
 
 static GPIO_TypeDef *const keypad_row_ports[KEYPAD_ROWS] = {GPIOB, GPIOB, GPIOB, GPIOD};
 static const uint16_t keypad_row_pins[KEYPAD_ROWS] = {GPIO_PIN_5, GPIO_PIN_4, GPIO_PIN_3, GPIO_PIN_2};
@@ -493,12 +636,16 @@ static void MX_TIM3_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void FSK_Init(void);
+#if FSK_HIGH_PROFILE_ENABLE != 0U
+static void FSK_ApplyProfile(uint8_t high_profile);
+#endif
 static void FSK_UpdateGoertzelCoefficient(uint8_t index);
 static float FSK_WindowMean(const uint16_t *samples, uint16_t len);
 static float Goertzel_EnergyWithMean(const uint16_t *samples, uint16_t len, float coeff, float mean);
 static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len);
 static void FSK_ProcessSymbol(const uint16_t *samples);
 static void Calibration_ResetProgress(void);
+static void Calibration_StartVerificationPass(uint32_t now);
 static void Calibration_Apply(void);
 static void Calibration_ProcessBlock(const uint16_t *samples,
                                      const FSK_DetectResult *result,
@@ -512,7 +659,8 @@ static void MessageRx_AddPreambleRawWindow(uint8_t index,
                                            uint32_t now);
 static void MessageRx_CapturePreambleHardWindow(const FSK_DetectResult *result,
                                                  uint32_t now);
-static void MessageRx_ApplyPreambleEnergyScale(void);
+static void MessageRx_RestoreCalibrationEnergyScale(void);
+static void MessageRx_ApplyPreambleFrameScale(void);
 static void MessageRx_CaptureTimedPreamble(const FSK_DetectResult *result, uint32_t now);
 static uint8_t MessageRx_TryTimedPreambleRecovery(uint32_t now);
 static uint8_t MessageRx_DataWindowPosition(uint32_t now, uint8_t *slot,
@@ -523,26 +671,55 @@ static uint8_t MessageRx_SelectSoftDataCandidate(const FSK_DetectResult *result,
                                                   float *second_energy, float *confidence);
 static void MessageRx_CaptureSoftDataWindow(const FSK_DetectResult *result, uint32_t now);
 static uint8_t MessageRx_TrySoftEnd1(const FSK_DetectResult *result, uint32_t now);
-static void MessageRx_AppendRsBits(uint8_t decoded_bits, uint8_t erased);
+static void MessageRx_AppendRsBits(uint8_t decoded_bits, uint8_t erased,
+                                   float confidence);
+static void MessageRx_RecordDecision(uint16_t fsk_index, uint8_t source,
+                                     uint8_t selected_bits, float confidence,
+                                     const float *energy);
+static void MessageRx_PrintDecisionDiagnostics(void);
 static void MessageRx_ClearCapture(void);
 static void MessageRx_FinalizeCapture(void);
 static void MessageRx_ResetFrame(void);
 static const char *MessageRx_StateName(MessageRxState state);
 static void MessageRx_PrintSymbol(const FSK_DetectResult *result, uint32_t now);
 static uint8_t Message_WhiteningMask(uint16_t fsk_symbol_index);
+static uint8_t Node_SourceBitsFromId(uint8_t node_id);
+static uint8_t Node_IdFromSourceBits(uint8_t bits);
+static const char *Node_DestinationLabel(uint8_t destination);
+static void Node_SetLocalId(uint8_t node_id);
+static void Node_CycleDestination(void);
 static uint8_t Message_CharToCode(char ch);
 static char Message_CodeToChar(uint8_t code);
+static uint16_t Message_Crc12Symbols(const uint8_t *symbols, uint8_t count);
+static uint16_t Message_Crc12Addressed(uint8_t source, uint8_t destination,
+                                      const uint8_t *symbols, uint8_t count);
+static uint8_t Message_CrcSelfTest(void);
+static MessagePayloadStatus Message_ValidateRsPayload(const uint8_t *codewords,
+                                                       uint8_t source,
+                                                       uint8_t destination,
+                                                       char *text,
+                                                       uint8_t *text_len,
+                                                       uint16_t *received_crc,
+                                                       uint16_t *calculated_crc,
+                                                       uint8_t *failure_index,
+                                                       uint8_t *failure_code);
 static uint32_t MessageStore_HashRecord(const MessageStoreRecord *record);
+static uint8_t MessageStore_RecordLength(const MessageStoreRecord *record);
+static uint8_t MessageStore_RecordSource(const MessageStoreRecord *record);
+static uint8_t MessageStore_RecordDestination(const MessageStoreRecord *record);
 static uint8_t MessageStore_RecordIsErased(uint32_t address);
 static uint8_t MessageStore_RecordValid(const MessageStoreRecord *record);
-static void MessageStore_CacheAppend(uint32_t sequence, const char *text, uint8_t len);
+static void MessageStore_CacheAppend(uint32_t sequence, const char *text, uint8_t len,
+                                     uint8_t source, uint8_t destination);
 static void MessageStore_BuildRecord(MessageStoreRecord *record, uint32_t sequence,
-                                     const char *text, uint8_t len);
+                                     const char *text, uint8_t len,
+                                     uint8_t source, uint8_t destination);
 static uint8_t MessageStore_ProgramRecordUnlocked(uint32_t address,
                                                   const MessageStoreRecord *record);
 static uint8_t MessageStore_CompactUnlocked(void);
 static void MessageStore_Init(void);
-static uint8_t MessageStore_Save(const char *text, uint8_t len);
+static uint8_t MessageStore_Save(const char *text, uint8_t len,
+                                 uint8_t source, uint8_t destination);
 static void MessageStore_Task(void);
 static void MessageStore_HandleRxKey(char key);
 static void RS_Init(void);
@@ -551,7 +728,21 @@ static uint8_t RS_GfDiv(uint8_t a, uint8_t b);
 static uint8_t RS_PolyEvalAscending(const uint8_t *poly, uint8_t degree, uint8_t x);
 static void RS_CalculateSyndromes(const uint8_t *codeword, uint8_t *syndromes);
 static void RS_Encode(const uint8_t *data, uint8_t *codeword);
-static int8_t RS_Decode(uint8_t *codeword, uint8_t *corrected_count);
+static int8_t RS_Decode(uint8_t *codeword, const uint8_t *erasure_positions,
+                        uint8_t erasure_count, uint8_t *corrected_count);
+static int8_t RS_DecodeAdaptive(uint8_t *codeword,
+                                const uint8_t *erased_flags,
+                                const float *reliability,
+                                uint8_t *corrected_count,
+                                uint8_t *used_erasure_count,
+                                uint8_t *adaptive_erasure_count);
+static int8_t RS_DecodeAdaptiveAttempt(const uint8_t *received,
+                                       const uint8_t *erased_flags,
+                                       const float *reliability,
+                                       uint8_t adaptive_erasure_count,
+                                       uint8_t *decoded,
+                                       uint8_t *corrected_count,
+                                       uint8_t *used_erasure_count);
 static uint8_t RS_SelfTest(void);
 static uint8_t OLED_Init(void);
 static void OLED_Clear(void);
@@ -563,6 +754,7 @@ static void OLED_PrintAt(uint8_t col, uint8_t page, const char *text);
 static void OLED_PrintLine(uint8_t page, const char *text);
 static void OLED_PrintChar(char ch);
 static const uint8_t *OLED_Font5x7(char ch);
+static void OLED_ShowStartupScreen(void);
 static void OLED_PrintDetected(const FSK_DetectResult *result);
 static void OLED_PrintMode(void);
 static void OLED_PrintTextRows(const char *text, uint8_t len);
@@ -574,6 +766,7 @@ static void TX_Stop(void);
 static void TX_AudioTick(void);
 static void TX_LoadFrameSymbol(uint16_t index);
 static void TX_LoadCalibrationTone(uint8_t stage);
+static void TX_LoadCalibrationBoundaryTone(void);
 static void TX_BuildMessageFrame(void);
 static uint32_t TX_PhaseIncFromFreq(uint16_t freq_hz);
 static uint8_t TX_ScaledSineSample(void);
@@ -581,12 +774,17 @@ static void SPI1_Write16(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint16_t word);
 static void DAC_Write12(uint16_t code);
 static void DAC_WriteSample8(uint8_t sample);
 static void PGA_SetGain(uint8_t gain_code);
+static uint8_t PGA_IsCalibrationToneQualified(const FSK_DetectResult *result);
+static uint8_t PGA_AutoGainControl(const FSK_DetectResult *result, uint32_t now);
+static uint8_t PGA_ManualAdjust(int8_t direction);
+static const char *PGA_AdcQuality(void);
 static void TX_UI_Task(void);
 static uint8_t RX_StartSampling(void);
 static void RX_StopSampling(void);
 static void RX_ResetDetector(void);
 static void HalfDuplex_Task(void);
 static void App_ToggleMode(void);
+static void CommunicationMode_Select(CommunicationMode mode);
 static void Editor_Task(void);
 static void Editor_ProcessKey(char key);
 static const char *Editor_KeyGroup(char key);
@@ -599,58 +797,37 @@ static void Editor_Delete(void);
 static void Keypad_Task(void);
 static uint8_t Keypad_ScanRaw(void);
 static void Keypad_HandlePress(uint8_t key);
+static void Keypad_HandleLongPress(uint8_t key);
 static void StatusLed_Update(void);
 static void StatusLed_NotifyRxComplete(void);
-static void PowerHold_EarlyOn(void);
-static void PowerKey_Task(void);
+static void PowerKill_EarlyKeepAlive(void);
+static void PowerInt_Task(void);
 static void App_PowerOff(void);
 static void OLED_RetryInitTask(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void PowerHold_EarlyOn(void)
+static void PowerKill_EarlyKeepAlive(void)
 {
-  /* Keep Q1 on as soon as possible after reset, before HAL/system init. */
+  /* Keep LTC2950 KILL high as soon as possible, before HAL/system init. */
   RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
   __DSB();
 
-  GPIOC->BSRR = POWER_HOLD_Pin;
+  GPIOC->BSRR = POWER_KILL_Pin;
   GPIOC->MODER = (GPIOC->MODER & ~(3UL << (1U * 2U))) | (1UL << (1U * 2U));
-  GPIOC->OTYPER &= ~POWER_HOLD_Pin;
+  GPIOC->OTYPER &= ~POWER_KILL_Pin;
   GPIOC->OSPEEDR &= ~(3UL << (1U * 2U));
   GPIOC->PUPDR &= ~(3UL << (1U * 2U));
-  GPIOC->BSRR = POWER_HOLD_Pin;
+  GPIOC->BSRR = POWER_KILL_Pin;
 }
 
-static void PowerKey_Task(void)
+static void PowerInt_Task(void)
 {
-  static uint8_t armed_after_release = 0U;
   static uint8_t poweroff_started = 0U;
-  static uint32_t press_start_ms = 0U;
-  uint8_t pressed;
-  uint32_t now = HAL_GetTick();
 
-  pressed = (HAL_GPIO_ReadPin(POWER_KEY_GPIO_Port, POWER_KEY_Pin) == POWER_KEY_PRESSED) ? 1U : 0U;
-
-  if (pressed == 0U)
-  {
-    armed_after_release = 1U;
-    press_start_ms = 0U;
-    return;
-  }
-
-  if (armed_after_release == 0U)
-  {
-    return;
-  }
-
-  if (press_start_ms == 0U)
-  {
-    press_start_ms = now;
-  }
-
-  if ((poweroff_started == 0U) && ((now - press_start_ms) >= POWER_OFF_HOLD_MS))
+  if ((poweroff_started == 0U) &&
+      (HAL_GPIO_ReadPin(POWER_INT_GPIO_Port, POWER_INT_Pin) == POWER_INT_ASSERTED))
   {
     poweroff_started = 1U;
     App_PowerOff();
@@ -659,24 +836,19 @@ static void PowerKey_Task(void)
 
 static void App_PowerOff(void)
 {
-  printf("power key pressed: PC1 low, release SW2 to power off\r\n");
+  printf("power INT# asserted: stopping, PC1/KILL low\r\n");
 
   TX_Stop();
   HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
   HAL_GPIO_WritePin(BOARD_LED_GPIO_Port, BOARD_LED_Pin, BOARD_LED_OFF);
 
-  OLED_Clear();
-  OLED_PrintAt(0U, 0U, "VOICE MSG");
-  OLED_PrintAt(0U, 2U, "PWR OFF");
-  OLED_PrintAt(0U, 4U, "LET GO");
-  HAL_Delay(150U);
   OLED_WriteCommand(0xAEU);
 
-  HAL_GPIO_WritePin(POWER_HOLD_GPIO_Port, POWER_HOLD_Pin, POWER_HOLD_OFF);
+  HAL_GPIO_WritePin(POWER_KILL_GPIO_Port, POWER_KILL_Pin, POWER_KILL_POWER_OFF);
 
   while (1)
   {
-    HAL_GPIO_WritePin(POWER_HOLD_GPIO_Port, POWER_HOLD_Pin, POWER_HOLD_OFF);
+    HAL_GPIO_WritePin(POWER_KILL_GPIO_Port, POWER_KILL_Pin, POWER_KILL_POWER_OFF);
   }
 }
 
@@ -707,6 +879,45 @@ static void FSK_Init(void)
   Calibration_ResetProgress();
 }
 
+#if FSK_HIGH_PROFILE_ENABLE != 0U
+static void FSK_ApplyProfile(uint8_t high_profile)
+{
+  const uint16_t *profile_freqs;
+  const uint8_t *profile_amps;
+  uint32_t tim2_period;
+
+  fsk_high_profile_enabled = (high_profile != 0U) ? 1U : 0U;
+  profile_freqs = (fsk_high_profile_enabled != 0U) ? fsk_high_freqs_hz : fsk_normal_freqs_hz;
+  profile_amps = (fsk_high_profile_enabled != 0U) ? tx_high_fsk_amp : tx_normal_fsk_amp;
+  fsk_sample_rate_hz = (fsk_high_profile_enabled != 0U) ? FSK_HIDDEN_FS_HZ : FSK_NORMAL_FS_HZ;
+  fsk_symbol_samples = (fsk_high_profile_enabled != 0U) ?
+                       FSK_HIDDEN_SYMBOL_SAMPLES : FSK_NORMAL_SYMBOL_SAMPLES;
+
+  /* Mode selection happens before RX starts, so TIM2 and DMA can be sized as
+     one complete 20 ms detector window per half-buffer. */
+  tim2_period = TIM2_COUNTER_CLOCK_HZ / fsk_sample_rate_hz;
+  htim2.Init.Period = tim2_period - 1U;
+  __HAL_TIM_SET_AUTORELOAD(&htim2, htim2.Init.Period);
+  __HAL_TIM_SET_COUNTER(&htim2, 0U);
+  htim2.Instance->EGR = TIM_EGR_UG;
+  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+
+  for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+  {
+    fsk_tx_freqs_hz[i] = profile_freqs[i];
+    tx_fsk_amp[i] = profile_amps[i];
+  }
+
+  printf("FSK profile selected: %s, data=%u/%u/%u/%uHz sync=%uHz amp=%u/%u/%u/%u/%u ADC=%luHz/%u samples\r\n",
+         (fsk_high_profile_enabled != 0U) ? "HIGH" : "NORMAL",
+         fsk_tx_freqs_hz[0], fsk_tx_freqs_hz[1], fsk_tx_freqs_hz[2], fsk_tx_freqs_hz[3],
+         fsk_tx_freqs_hz[FSK_SYNC_SYMBOL],
+         tx_fsk_amp[0], tx_fsk_amp[1], tx_fsk_amp[2], tx_fsk_amp[3],
+         tx_fsk_amp[FSK_SYNC_SYMBOL],
+         (unsigned long)fsk_sample_rate_hz, fsk_symbol_samples);
+}
+#endif
+
 static void FSK_UpdateGoertzelCoefficient(uint8_t index)
 {
   if (index >= FSK_FREQ_COUNT)
@@ -715,7 +926,8 @@ static void FSK_UpdateGoertzelCoefficient(uint8_t index)
   }
 
   fsk_goertzel_coeffs[index] =
-      2.0f * cosf((2.0f * FSK_PI * (float)fsk_rx_freqs_hz[index]) / (float)FSK_FS_HZ);
+      2.0f * cosf((2.0f * FSK_PI * (float)fsk_rx_freqs_hz[index]) /
+                  (float)fsk_sample_rate_hz);
 }
 
 static void Calibration_ResetProgress(void)
@@ -726,9 +938,23 @@ static void Calibration_ResetProgress(void)
   calibration_stage = 0U;
   calibration_stable_windows = 0U;
   calibration_capture_active = 0U;
-  calibration_complete = 0U;
+  calibration_complete = (communication_mode == COMM_MODE_MULTI_NODE) ? 1U : 0U;
+  calibration_failed = 0U;
   calibration_progress_tick = HAL_GetTick();
-  preamble_scale_initialized = 0U;
+  calibration_pass = 0U;
+  calibration_coarse_activity = 0U;
+  calibration_boundary_windows = 0U;
+  calibration_coarse_last_signal_tick = 0U;
+  calibration_adc_min_seen = 0xFFFFU;
+  calibration_adc_max_seen = 0U;
+  calibration_adc_mean_last = 2048U;
+  rx_pga_agc_last_adjust_tick = 0U;
+  rx_pga_agc_high_windows = 0U;
+  rx_pga_agc_clip_windows = 0U;
+  rx_pga_agc_low_windows = 0U;
+  rx_pga_gain_code = (communication_mode == COMM_MODE_MULTI_NODE) ?
+                     RX_PGA_MULTI_GAIN_CODE : RX_PGA_DEFAULT_GAIN_CODE;
+  PGA_SetGain(rx_pga_gain_code);
   memset(calibration_energy, 0, sizeof(calibration_energy));
   MessageRx_ResetPreambleCapture();
 
@@ -736,9 +962,43 @@ static void Calibration_ResetProgress(void)
   {
     fsk_rx_freqs_hz[i] = fsk_tx_freqs_hz[i];
     fsk_energy_scale[i] = 1.0f;
+    if (i < FSK_DATA_FREQ_COUNT)
+    {
+      calibration_energy_scale[i] = 1.0f;
+    }
     fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
     FSK_UpdateGoertzelCoefficient(i);
   }
+}
+
+static void Calibration_StartVerificationPass(uint32_t now)
+{
+  calibration_pass = 1U;
+  calibration_energy_sum = 0.0f;
+  calibration_energy_windows = 0U;
+  calibration_lost_windows = 0U;
+  calibration_stage = 0U;
+  calibration_stable_windows = 0U;
+  calibration_capture_active = 0U;
+  calibration_progress_tick = now;
+  calibration_coarse_activity = 0U;
+  calibration_boundary_windows = 0U;
+  calibration_coarse_last_signal_tick = 0U;
+  calibration_adc_min_seen = 0xFFFFU;
+  calibration_adc_max_seen = 0U;
+  calibration_adc_mean_last = 2048U;
+  rx_pga_agc_high_windows = 0U;
+  rx_pga_agc_clip_windows = 0U;
+  rx_pga_agc_low_windows = 0U;
+  memset(calibration_energy, 0, sizeof(calibration_energy));
+  for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+  {
+    fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
+  }
+  RX_ResetDetector();
+  printf("calibration pass 1/2 AGC up/down complete: pass 2/2 verify with automatic down-only, PGA=x%u\r\n",
+         rx_pga_gain_values[rx_pga_gain_code]);
+  OLED_PrintRxStatus();
 }
 
 static float FSK_WindowMean(const uint16_t *samples, uint16_t len)
@@ -774,6 +1034,19 @@ static void Calibration_Apply(void)
 {
   float reference_energy = calibration_energy[0];
 
+  if ((calibration_adc_min_seen <= RX_PGA_ADC_CLIP_MARGIN) ||
+      (calibration_adc_max_seen >= (4095U - RX_PGA_ADC_CLIP_MARGIN)))
+  {
+    calibration_capture_active = 0U;
+    calibration_complete = 0U;
+    calibration_failed = 1U;
+    printf("calibration failed: pass 2 ADC CLIP at PGA x%u min=%u max=%u; retry farther away or reduce analog gain\r\n",
+           rx_pga_gain_values[rx_pga_gain_code],
+           calibration_adc_min_seen, calibration_adc_max_seen);
+    OLED_PrintRxStatus();
+    return;
+  }
+
   for (uint8_t i = 1U; i < FSK_DATA_FREQ_COUNT; i++)
   {
     if (calibration_energy[i] < reference_energy)
@@ -799,6 +1072,7 @@ static void Calibration_Apply(void)
 
     fsk_rx_freqs_hz[i] = fsk_tx_freqs_hz[i];
     fsk_energy_scale[i] = scale;
+    calibration_energy_scale[i] = scale;
     fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
     FSK_UpdateGoertzelCoefficient(i);
   }
@@ -807,11 +1081,12 @@ static void Calibration_Apply(void)
   fsk_energy_scale[FSK_DATA_FREQ_COUNT] = 1.0f;
   fsk_noise_floor[FSK_DATA_FREQ_COUNT] = FSK_NOISE_MIN_FLOOR;
   FSK_UpdateGoertzelCoefficient(FSK_DATA_FREQ_COUNT);
+  calibration_failed = 0U;
   calibration_complete = 1U;
-  preamble_scale_initialized = 0U;
   RX_ResetDetector();
 
-  printf("calibration complete: fixed-frequency Goertzel reference=min_mean\r\n");
+  printf("calibration complete: pass 2/2 verified, MCP6S21 x%u, fixed-frequency Goertzel reference=min_mean\r\n",
+         rx_pga_gain_values[rx_pga_gain_code]);
   for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
   {
     printf("cal %s: G=%uHz meanE/1e6=%u scale=%lu.%03lu\r\n",
@@ -828,10 +1103,69 @@ static void Calibration_ProcessBlock(const uint16_t *samples,
                                      const FSK_DetectResult *result,
                                      uint32_t now)
 {
+  uint8_t calibration_tone_qualified;
+
   (void)samples;
 
-  if (calibration_complete != 0U)
+  if ((communication_mode != COMM_MODE_STANDARD) &&
+      (communication_mode != COMM_MODE_HIDDEN))
   {
+    return;
+  }
+
+  if ((calibration_complete != 0U) || (calibration_failed != 0U))
+  {
+    return;
+  }
+
+  calibration_tone_qualified = PGA_IsCalibrationToneQualified(result);
+  if (PGA_AutoGainControl(result, now) != 0U)
+  {
+    return;
+  }
+  if ((calibration_tone_qualified != 0U) &&
+      (result->adc_min > RX_PGA_ADC_CLIP_MARGIN) &&
+      (result->adc_max < (4095U - RX_PGA_ADC_CLIP_MARGIN)))
+  {
+    calibration_adc_mean_last = (uint16_t)result->adc_mean;
+    if (result->adc_min < calibration_adc_min_seen)
+    {
+      calibration_adc_min_seen = result->adc_min;
+    }
+    if (result->adc_max > calibration_adc_max_seen)
+    {
+      calibration_adc_max_seen = result->adc_max;
+    }
+  }
+
+  if (calibration_pass == 0U)
+  {
+    if ((result->valid != 0U) && (result->bits == FSK_SYNC_SYMBOL))
+    {
+      if (calibration_boundary_windows < CALIBRATION_BOUNDARY_STABLE_WINDOWS)
+      {
+        calibration_boundary_windows++;
+      }
+      if (calibration_boundary_windows >= CALIBRATION_BOUNDARY_STABLE_WINDOWS)
+      {
+        printf("calibration interpass boundary: 2000Hz SYNC accepted after %u windows\r\n",
+               CALIBRATION_BOUNDARY_STABLE_WINDOWS);
+        Calibration_StartVerificationPass(now);
+      }
+      return;
+    }
+
+    calibration_boundary_windows = 0U;
+    if ((result->valid != 0U) && (result->bits < FSK_DATA_FREQ_COUNT))
+    {
+      calibration_coarse_activity = 1U;
+      calibration_coarse_last_signal_tick = now;
+    }
+    else if ((calibration_coarse_activity != 0U) &&
+             ((now - calibration_coarse_last_signal_tick) >= CALIBRATION_GAP_DETECT_MS))
+    {
+      Calibration_StartVerificationPass(now);
+    }
     return;
   }
 
@@ -1007,7 +1341,7 @@ static FSK_DetectResult FSK_DetectSymbol(const uint16_t *samples, uint16_t len)
 
 static void FSK_ProcessSymbol(const uint16_t *samples)
 {
-  FSK_DetectResult result = FSK_DetectSymbol(samples, FSK_SYMBOL_SAMPLES);
+  FSK_DetectResult result = FSK_DetectSymbol(samples, fsk_symbol_samples);
   static uint32_t last_idle_log = 0U;
   static uint32_t last_oled_rx_seq = 0U;
   uint32_t now = HAL_GetTick();
@@ -1025,7 +1359,8 @@ static void FSK_ProcessSymbol(const uint16_t *samples)
   if ((result.valid == 0U) && ((now - last_idle_log) >= UART_IDLE_LOG_MS))
   {
     last_idle_log = now;
-    printf("idle: Emax=%u, E2=%u, ADC mean=%u min=%u max=%u\r\n",
+    printf("idle: PGA=x%u, Emax=%u, E2=%u, ADC mean=%u min=%u max=%u\r\n",
+           rx_pga_gain_values[rx_pga_gain_code],
            (unsigned int)result.max_energy,
            (unsigned int)result.second_energy,
            (unsigned int)result.adc_mean,
@@ -1293,55 +1628,119 @@ static void MessageRx_CapturePreambleHardWindow(const FSK_DetectResult *result,
   }
 }
 
-static void MessageRx_ApplyPreambleEnergyScale(void)
+static void MessageRx_RestoreCalibrationEnergyScale(void)
 {
-  float raw_energy[FSK_DATA_FREQ_COUNT];
-  float target_scale[FSK_DATA_FREQ_COUNT];
-  float applied_scale[FSK_DATA_FREQ_COUNT];
-  float reference_energy = 0.0f;
-  float max_applied_scale = 0.0f;
-
-  for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
+  if (calibration_complete == 0U)
   {
-    if (msg_preamble_raw_count[i] < 2U)
-    {
-      printf("preamble energy update skipped: %s has only %u raw window(s)\r\n",
-             FSK_BitsToString(i), msg_preamble_raw_count[i]);
-      return;
-    }
-    else
-    {
-      raw_energy[i] = 0.5f * (msg_preamble_raw_top1[i] + msg_preamble_raw_top2[i]);
-    }
-
-    if ((i == 0U) || (raw_energy[i] < reference_energy))
-    {
-      reference_energy = raw_energy[i];
-    }
-  }
-  if (reference_energy <= 0.0f)
-  {
-    printf("preamble energy update skipped: invalid reference\r\n");
     return;
   }
 
   for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
   {
-    target_scale[i] = reference_energy / raw_energy[i];
-    if (target_scale[i] < PREAMBLE_ENERGY_SCALE_MIN)
+    fsk_energy_scale[i] = calibration_energy_scale[i];
+    fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
+  }
+  fsk_energy_scale[FSK_DATA_FREQ_COUNT] = 1.0f;
+  fsk_noise_floor[FSK_DATA_FREQ_COUNT] = FSK_NOISE_MIN_FLOOR;
+}
+
+static void MessageRx_ApplyPreambleFrameScale(void)
+{
+  float frame_energy[FSK_DATA_FREQ_COUNT];
+  float correction[FSK_DATA_FREQ_COUNT];
+  float applied_scale[FSK_DATA_FREQ_COUNT];
+  uint8_t energy_windows_used[FSK_DATA_FREQ_COUNT];
+  uint8_t single_window_fallbacks = 0U;
+  float pair_01;
+  float pair_23;
+  float reference_energy;
+  float max_applied_scale = 0.0f;
+
+  MessageRx_RestoreCalibrationEnergyScale();
+  for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
+  {
+    if (msg_preamble_raw_count[i] == 0U)
     {
-      target_scale[i] = PREAMBLE_ENERGY_SCALE_MIN;
+      printf("preamble frame scale skipped: %s has no hard window\r\n",
+             FSK_BitsToString(i));
+      return;
     }
 
-    if (preamble_scale_initialized == 0U)
+    /* Capture stores raw (unscaled) Goertzel energy.  Prefer the mean of the
+       two strongest windows.  A 60+10 ms PREAMBLE can occasionally provide
+       only one hard-valid 20 ms window for 00; using that already-qualified
+       window is safer than discarding all four frame measurements and falling
+       back to a highly unequal startup calibration.  The existing energy,
+       square-root correction and ratio guards still bound this fallback. */
+    if (msg_preamble_raw_count[i] >= 2U)
     {
-      applied_scale[i] = target_scale[i];
+      frame_energy[i] =
+          0.5f * (msg_preamble_raw_top1[i] + msg_preamble_raw_top2[i]) *
+          calibration_energy_scale[i];
+      energy_windows_used[i] = 2U;
     }
     else
     {
-      applied_scale[i] = ((1.0f - PREAMBLE_SCALE_NEW_WEIGHT) * fsk_energy_scale[i]) +
-                         (PREAMBLE_SCALE_NEW_WEIGHT * target_scale[i]);
+      frame_energy[i] = msg_preamble_raw_top1[i] * calibration_energy_scale[i];
+      energy_windows_used[i] = 1U;
+      single_window_fallbacks++;
     }
+    if (frame_energy[i] < PREAMBLE_RECOVERY_ENERGY_MIN)
+    {
+      printf("preamble frame scale skipped: weak %s E/1e6=%u captured=%u used=%u\r\n",
+             FSK_BitsToString(i),
+             (unsigned int)(frame_energy[i] / 1000000.0f),
+             (unsigned int)msg_preamble_raw_count[i],
+             (unsigned int)energy_windows_used[i]);
+      return;
+    }
+  }
+
+  /* Correct only half of the measured imbalance (square root), then clamp
+     each bin relative to the startup calibration.  The top-two mean avoids
+     making the decision from one 20 ms window that may land on tone attack or
+     inter-symbol ringing. */
+  pair_01 = sqrtf(frame_energy[0] * frame_energy[1]);
+  pair_23 = sqrtf(frame_energy[2] * frame_energy[3]);
+  reference_energy = sqrtf(pair_01 * pair_23);
+  if (reference_energy <= 0.0f)
+  {
+    printf("preamble frame scale skipped: invalid reference\r\n");
+    return;
+  }
+
+  for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
+  {
+    correction[i] = sqrtf(reference_energy / frame_energy[i]);
+    if (correction[i] < PREAMBLE_FRAME_SCALE_MIN_CORR)
+    {
+      correction[i] = PREAMBLE_FRAME_SCALE_MIN_CORR;
+    }
+    else if (correction[i] > PREAMBLE_FRAME_SCALE_MAX_CORR)
+    {
+      correction[i] = PREAMBLE_FRAME_SCALE_MAX_CORR;
+    }
+
+    applied_scale[i] = calibration_energy_scale[i] * correction[i];
+  }
+
+  /* This acoustic path can make a weak 4500 Hz PREAMBLE sample boost the
+     4500 Hz bin enough to absorb following 3500 Hz symbols.  Successful
+     captures stayed below about 1.8x while failed captures were 4x..13x, so
+     keep the frame-local 4500/3500 ratio inside a conservative 2.5x guard. */
+  if (applied_scale[3] > (applied_scale[2] * PREAMBLE_FRAME_MAX_4500_TO_3500))
+  {
+    uint32_t ratio_x1000 =
+        (uint32_t)((applied_scale[3] * 1000.0f) / applied_scale[2]);
+
+    applied_scale[3] = applied_scale[2] * PREAMBLE_FRAME_MAX_4500_TO_3500;
+    printf("preamble 4500/3500 guard: ratio=%lu.%03lu capped=2.500\r\n",
+           (unsigned long)(ratio_x1000 / 1000U),
+           (unsigned long)(ratio_x1000 % 1000U));
+  }
+
+  for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
+  {
     if (applied_scale[i] > max_applied_scale)
     {
       max_applied_scale = applied_scale[i];
@@ -1349,35 +1748,38 @@ static void MessageRx_ApplyPreambleEnergyScale(void)
   }
   if (max_applied_scale <= 0.0f)
   {
-    printf("preamble energy update skipped: invalid applied scale\r\n");
+    printf("preamble frame scale skipped: invalid applied scale\r\n");
     return;
   }
 
-  printf("preamble energy update: top-2 raw windows, %s\r\n",
-         (preamble_scale_initialized == 0U) ? "first absolute" : "50pct smoothed");
+  printf("preamble frame scale: top2 mean + qualified top1 fallback, bounded sqrt, current frame only; top1=%u\r\n",
+         (unsigned int)single_window_fallbacks);
   for (uint8_t i = 0U; i < FSK_DATA_FREQ_COUNT; i++)
   {
-    uint32_t target_x1000 = (uint32_t)(target_scale[i] * 1000.0f);
-    uint32_t scale_x1000;
+    uint32_t base_x1000 = (uint32_t)(calibration_energy_scale[i] * 1000.0f);
+    uint32_t correction_x1000 = (uint32_t)(correction[i] * 1000.0f);
+    uint32_t frame_x1000;
 
     applied_scale[i] /= max_applied_scale;
-    if (applied_scale[i] < PREAMBLE_ENERGY_SCALE_MIN)
+    if (applied_scale[i] < CALIBRATION_SCALE_MIN)
     {
-      applied_scale[i] = PREAMBLE_ENERGY_SCALE_MIN;
+      applied_scale[i] = CALIBRATION_SCALE_MIN;
     }
     fsk_energy_scale[i] = applied_scale[i];
     fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
-    scale_x1000 = (uint32_t)(applied_scale[i] * 1000.0f);
-    printf("preamble %s: rawE/1e6=%u windows=%u target=%lu.%03lu scale=%lu.%03lu\r\n",
+    frame_x1000 = (uint32_t)(applied_scale[i] * 1000.0f);
+    printf("frame %s: E/1e6=%u captured=%u used=%u base=%lu.%03lu corr=%lu.%03lu scale=%lu.%03lu\r\n",
            FSK_BitsToString(i),
-           (unsigned int)(raw_energy[i] / 1000000.0f),
+           (unsigned int)(frame_energy[i] / 1000000.0f),
            (unsigned int)msg_preamble_raw_count[i],
-           (unsigned long)(target_x1000 / 1000U),
-           (unsigned long)(target_x1000 % 1000U),
-           (unsigned long)(scale_x1000 / 1000U),
-           (unsigned long)(scale_x1000 % 1000U));
+           (unsigned int)energy_windows_used[i],
+           (unsigned long)(base_x1000 / 1000U),
+           (unsigned long)(base_x1000 % 1000U),
+           (unsigned long)(correction_x1000 / 1000U),
+           (unsigned long)(correction_x1000 % 1000U),
+           (unsigned long)(frame_x1000 / 1000U),
+           (unsigned long)(frame_x1000 % 1000U));
   }
-  preamble_scale_initialized = 1U;
 }
 
 static void MessageRx_CaptureTimedPreamble(const FSK_DetectResult *result, uint32_t now)
@@ -1424,16 +1826,28 @@ static void MessageRx_CaptureTimedPreamble(const FSK_DetectResult *result, uint3
     MessageRx_AddPreambleRawWindow(3U, result, now);
   }
   if ((delta >= PREAMBLE_RECOVERY_START0_START_MS) &&
-      (delta <= PREAMBLE_RECOVERY_START0_END_MS) &&
-      (result->data_energy[msg_start[0]] > msg_preamble_recovery_start_energy[0]))
+      (delta <= PREAMBLE_RECOVERY_START0_END_MS))
   {
-    msg_preamble_recovery_start_energy[0] = result->data_energy[msg_start[0]];
+    for (uint8_t bits = 0U; bits < 3U; bits++)
+    {
+      if (result->data_energy[bits] > msg_preamble_recovery_start_energy[0])
+      {
+        msg_preamble_recovery_start_energy[0] = result->data_energy[bits];
+        msg_preamble_recovery_start_bits[0] = bits;
+      }
+    }
   }
   if ((delta >= PREAMBLE_RECOVERY_START1_START_MS) &&
-      (delta <= PREAMBLE_RECOVERY_START1_END_MS) &&
-      (result->data_energy[msg_start[1]] > msg_preamble_recovery_start_energy[1]))
+      (delta <= PREAMBLE_RECOVERY_START1_END_MS))
   {
-    msg_preamble_recovery_start_energy[1] = result->data_energy[msg_start[1]];
+    for (uint8_t bits = 0U; bits < FSK_DATA_FREQ_COUNT; bits++)
+    {
+      if (result->data_energy[bits] > msg_preamble_recovery_start_energy[1])
+      {
+        msg_preamble_recovery_start_energy[1] = result->data_energy[bits];
+        msg_preamble_recovery_start_bits[1] = bits;
+      }
+    }
   }
 }
 
@@ -1476,23 +1890,47 @@ static uint8_t MessageRx_TryTimedPreambleRecovery(uint32_t now)
     }
   }
 
+  msg_rx_source_id = Node_IdFromSourceBits(msg_preamble_recovery_start_bits[0]);
+  msg_rx_destination_id = msg_preamble_recovery_start_bits[1];
+  if (msg_rx_source_id == 0U)
+  {
+    printf("timed preamble recovery rejected: invalid source bits=%s\r\n",
+           FSK_BitsToString(msg_preamble_recovery_start_bits[0]));
+    msg_preamble_recovery_active = 0U;
+    return 0U;
+  }
+
   memcpy(msg_preamble_energy, msg_preamble_recovery_energy, sizeof(msg_preamble_energy));
-  printf("rx timed preamble recovery: 00->01 anchor + marker delta=%lums\r\n",
-         (unsigned long)delta);
+  if (msg_rx_destination_id == 0U)
+  {
+    printf("rx timed preamble recovery: N%u->ALL, marker delta=%lums\r\n",
+           msg_rx_source_id, (unsigned long)delta);
+  }
+  else
+  {
+    printf("rx timed preamble recovery: N%u->N%u, marker delta=%lums\r\n",
+           msg_rx_source_id, msg_rx_destination_id, (unsigned long)delta);
+  }
   msg_preamble_capture_active = 0U;
-  MessageRx_ApplyPreambleEnergyScale();
+  MessageRx_ApplyPreambleFrameScale();
   msg_preamble_recovery_active = 0U;
   msg_preamble_index = 0U;
   msg_rs_symbol_index = 0U;
   msg_rs_fsk_index = 0U;
   msg_rs_symbol = 0U;
   msg_rs_current_erased = 0U;
+  msg_rs_current_reliability = RS_VOTE_RATIO_CAP;
   msg_rs_erasure_count = 0U;
   msg_soft_fallback_count = 0U;
+  msg_low_confidence_count = 0U;
   msg_vote_override_count = 0U;
+  msg_worst_decision_count = 0U;
+  memset(msg_worst_decisions, 0, sizeof(msg_worst_decisions));
   msg_marker_tick = now;
   MessageRx_ClearCapture();
   memset(msg_rs_codeword, 0, sizeof(msg_rs_codeword));
+  memset(msg_rs_codeword_erased, 0, sizeof(msg_rs_codeword_erased));
+  memset(msg_rs_codeword_reliability, 0, sizeof(msg_rs_codeword_reliability));
   msg_rx_state = MSG_RX_RS_CODEWORD;
   printf("rx start recovered by timed training; receiving %ux marker-framed RS(%u,%u) blocks\r\n",
          RS_BLOCK_COUNT, RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS);
@@ -1558,6 +1996,12 @@ static uint8_t MessageRx_CaptureDataWindow(const FSK_DetectResult *result, uint3
   }
 
   msg_capture_scores[slot][result->bits] += vote_ratio;
+  if (vote_ratio > msg_capture_best_ratio[slot][result->bits])
+  {
+    msg_capture_best_ratio[slot][result->bits] = vote_ratio;
+    memcpy(msg_capture_best_energy[slot][result->bits], result->data_energy,
+           sizeof(msg_capture_best_energy[slot][result->bits]));
+  }
   if ((msg_capture_valid[slot] == 0U) || (distance < msg_capture_distance[slot]))
   {
     msg_capture_bits[slot] = result->bits;
@@ -1657,6 +2101,14 @@ static void MessageRx_CaptureSoftDataWindow(const FSK_DetectResult *result, uint
     msg_soft_bits[slot] = candidate_bits;
     msg_soft_valid[slot] = 1U;
     msg_soft_score[slot] = score;
+    msg_soft_ratio[slot] = (second_energy > 1.0f) ?
+                           (candidate_energy / second_energy) : RS_VOTE_RATIO_CAP;
+    if (msg_soft_ratio[slot] > RS_VOTE_RATIO_CAP)
+    {
+      msg_soft_ratio[slot] = RS_VOTE_RATIO_CAP;
+    }
+    memcpy(msg_soft_energy[slot], result->data_energy,
+           sizeof(msg_soft_energy[slot]));
   }
 }
 
@@ -1689,11 +2141,21 @@ static uint8_t MessageRx_TrySoftEnd1(const FSK_DetectResult *result, uint32_t no
   return 1U;
 }
 
-static void MessageRx_AppendRsBits(uint8_t decoded_bits, uint8_t erased)
+static void MessageRx_AppendRsBits(uint8_t decoded_bits, uint8_t erased,
+                                   float confidence)
 {
+  if (msg_rs_fsk_index == 0U)
+  {
+    msg_rs_current_reliability = RS_VOTE_RATIO_CAP;
+  }
   if (erased != 0U)
   {
     msg_rs_current_erased = 1U;
+    confidence = 0.0f;
+  }
+  if (confidence < msg_rs_current_reliability)
+  {
+    msg_rs_current_reliability = confidence;
   }
 
   msg_rs_symbol = (uint8_t)((msg_rs_symbol << 2U) | (decoded_bits & 0x03U));
@@ -1707,8 +2169,11 @@ static void MessageRx_AppendRsBits(uint8_t decoded_bits, uint8_t erased)
     uint8_t wire_index = msg_rs_symbol_index;
     uint8_t block = (uint8_t)(wire_index % RS_BLOCK_COUNT);
     uint8_t block_index = (uint8_t)(wire_index / RS_BLOCK_COUNT);
+    uint16_t codeword_index = (uint16_t)(block * RS_CODEWORD_SYMBOLS) + block_index;
 
-    msg_rs_codeword[(block * RS_CODEWORD_SYMBOLS) + block_index] = msg_rs_symbol;
+    msg_rs_codeword[codeword_index] = msg_rs_symbol;
+    msg_rs_codeword_erased[codeword_index] = msg_rs_current_erased;
+    msg_rs_codeword_reliability[codeword_index] = msg_rs_current_reliability;
     msg_rs_symbol_index++;
   }
   if (msg_rs_current_erased != 0U)
@@ -1732,6 +2197,125 @@ static void MessageRx_AppendRsBits(uint8_t decoded_bits, uint8_t erased)
   msg_rs_symbol = 0U;
   msg_rs_fsk_index = 0U;
   msg_rs_current_erased = 0U;
+  msg_rs_current_reliability = RS_VOTE_RATIO_CAP;
+}
+
+static void MessageRx_RecordDecision(uint16_t fsk_index, uint8_t source,
+                                     uint8_t selected_bits, float confidence,
+                                     const float *energy)
+{
+  uint8_t target;
+
+  if ((source != RX_DECISION_ERASURE) &&
+      (confidence < FSK_RATIO_THRESHOLD))
+  {
+    msg_low_confidence_count++;
+  }
+
+  if (msg_worst_decision_count < RX_DIAG_WORST_COUNT)
+  {
+    target = msg_worst_decision_count;
+    msg_worst_decision_count++;
+  }
+  else
+  {
+    target = 0U;
+    for (uint8_t i = 1U; i < RX_DIAG_WORST_COUNT; i++)
+    {
+      if (msg_worst_decisions[i].confidence >
+          msg_worst_decisions[target].confidence)
+      {
+        target = i;
+      }
+    }
+    if (confidence >= msg_worst_decisions[target].confidence)
+    {
+      return;
+    }
+  }
+
+  msg_worst_decisions[target].fsk_index = fsk_index;
+  msg_worst_decisions[target].source = source;
+  msg_worst_decisions[target].selected_bits = selected_bits;
+  msg_worst_decisions[target].confidence = confidence;
+  if (energy != NULL)
+  {
+    memcpy(msg_worst_decisions[target].energy, energy,
+           sizeof(msg_worst_decisions[target].energy));
+  }
+  else
+  {
+    memset(msg_worst_decisions[target].energy, 0,
+           sizeof(msg_worst_decisions[target].energy));
+  }
+}
+
+static void MessageRx_PrintDecisionDiagnostics(void)
+{
+  uint8_t printed[RX_DIAG_WORST_COUNT] = {0};
+
+  printf("rx weak decisions: lowest %u of %u data slots\r\n",
+         msg_worst_decision_count,
+         RS_TOTAL_CODEWORD_SYMBOLS * RS_FSK_SYMBOLS_PER_SYMBOL);
+  for (uint8_t rank = 0U; rank < msg_worst_decision_count; rank++)
+  {
+    uint8_t selected = 0xFFU;
+    const RxDecisionDiagnostic *diag;
+    const char *source_name;
+    uint16_t wire_index;
+    uint8_t decoded_bits;
+
+    for (uint8_t i = 0U; i < msg_worst_decision_count; i++)
+    {
+      if ((printed[i] == 0U) &&
+          ((selected == 0xFFU) ||
+           (msg_worst_decisions[i].confidence <
+            msg_worst_decisions[selected].confidence)))
+      {
+        selected = i;
+      }
+    }
+    if (selected == 0xFFU)
+    {
+      break;
+    }
+    printed[selected] = 1U;
+    diag = &msg_worst_decisions[selected];
+    wire_index = (uint16_t)(diag->fsk_index / RS_FSK_SYMBOLS_PER_SYMBOL);
+    decoded_bits = (uint8_t)((diag->selected_bits ^
+                              Message_WhiteningMask(diag->fsk_index)) & 0x03U);
+
+    switch (diag->source)
+    {
+      case RX_DECISION_VOTE: source_name = "vote"; break;
+      case RX_DECISION_NEAREST: source_name = "nearest"; break;
+      case RX_DECISION_SOFT: source_name = "soft"; break;
+      default: source_name = "erasure"; break;
+    }
+
+    if (diag->source == RX_DECISION_ERASURE)
+    {
+      printf("rx weak B%u S%u slot%u src=%s ratio=0\r\n",
+             (wire_index % RS_BLOCK_COUNT) + 1U,
+             (wire_index / RS_BLOCK_COUNT) + 1U,
+             (diag->fsk_index % RS_FSK_SYMBOLS_PER_SYMBOL) + 1U,
+             source_name);
+    }
+    else
+    {
+      printf("rx weak B%u S%u slot%u src=%s tone=%s data=%s ratio_x100=%u E/1e6=%u/%u/%u/%u\r\n",
+             (wire_index % RS_BLOCK_COUNT) + 1U,
+             (wire_index / RS_BLOCK_COUNT) + 1U,
+             (diag->fsk_index % RS_FSK_SYMBOLS_PER_SYMBOL) + 1U,
+             source_name, FSK_BitsToString(diag->selected_bits),
+             FSK_BitsToString(decoded_bits),
+             (unsigned int)(diag->confidence * 100.0f),
+             (unsigned int)(diag->energy[0] / 1000000.0f),
+             (unsigned int)(diag->energy[1] / 1000000.0f),
+             (unsigned int)(diag->energy[2] / 1000000.0f),
+             (unsigned int)(diag->energy[3] / 1000000.0f));
+    }
+  }
 }
 
 static void MessageRx_ClearCapture(void)
@@ -1740,9 +2324,13 @@ static void MessageRx_ClearCapture(void)
   memset(msg_capture_valid, 0, sizeof(msg_capture_valid));
   memset(msg_capture_distance, 0xFF, sizeof(msg_capture_distance));
   memset(msg_capture_scores, 0, sizeof(msg_capture_scores));
+  memset(msg_capture_best_ratio, 0, sizeof(msg_capture_best_ratio));
+  memset(msg_capture_best_energy, 0, sizeof(msg_capture_best_energy));
   memset(msg_soft_bits, 0, sizeof(msg_soft_bits));
   memset(msg_soft_valid, 0, sizeof(msg_soft_valid));
   memset(msg_soft_score, 0, sizeof(msg_soft_score));
+  memset(msg_soft_ratio, 0, sizeof(msg_soft_ratio));
+  memset(msg_soft_energy, 0, sizeof(msg_soft_energy));
 }
 
 static void MessageRx_FinalizeCapture(void)
@@ -1774,38 +2362,58 @@ static void MessageRx_FinalizeCapture(void)
 
     if (voted_score > second_score)
     {
+      float confidence = (second_score > 0.0f) ?
+                         (voted_score / second_score) : RS_VOTE_RATIO_CAP;
+
+      if (confidence > RS_VOTE_RATIO_CAP)
+      {
+        confidence = RS_VOTE_RATIO_CAP;
+      }
       if ((msg_capture_valid[slot] == 0U) || (voted_bits != msg_capture_bits[slot]))
       {
         msg_vote_override_count++;
       }
       uint8_t decoded_bits = (uint8_t)((voted_bits ^
                                         Message_WhiteningMask(fsk_index)) & 0x03U);
-      MessageRx_AppendRsBits(decoded_bits, 0U);
+      MessageRx_RecordDecision(fsk_index, RX_DECISION_VOTE, voted_bits,
+                               confidence,
+                               msg_capture_best_energy[slot][voted_bits]);
+      MessageRx_AppendRsBits(decoded_bits, 0U, confidence);
     }
     else if (msg_capture_valid[slot] != 0U)
     {
       uint8_t decoded_bits = (uint8_t)((msg_capture_bits[slot] ^
                                         Message_WhiteningMask(fsk_index)) & 0x03U);
-      MessageRx_AppendRsBits(decoded_bits, 0U);
+      MessageRx_RecordDecision(fsk_index, RX_DECISION_NEAREST,
+                               msg_capture_bits[slot],
+                               msg_capture_best_ratio[slot][msg_capture_bits[slot]],
+                               msg_capture_best_energy[slot][msg_capture_bits[slot]]);
+      MessageRx_AppendRsBits(decoded_bits, 0U,
+                             msg_capture_best_ratio[slot][msg_capture_bits[slot]]);
     }
     else if (msg_soft_valid[slot] != 0U)
     {
       uint8_t decoded_bits = (uint8_t)((msg_soft_bits[slot] ^
                                         Message_WhiteningMask(fsk_index)) & 0x03U);
       msg_soft_fallback_count++;
-      MessageRx_AppendRsBits(decoded_bits, 0U);
+      MessageRx_RecordDecision(fsk_index, RX_DECISION_SOFT,
+                               msg_soft_bits[slot], msg_soft_ratio[slot],
+                               msg_soft_energy[slot]);
+      MessageRx_AppendRsBits(decoded_bits, 0U, msg_soft_ratio[slot]);
     }
     else
     {
-      MessageRx_AppendRsBits(0U, 1U);
+      MessageRx_RecordDecision(fsk_index, RX_DECISION_ERASURE, 0U, 0.0f, NULL);
+      MessageRx_AppendRsBits(0U, 1U, 0.0f);
     }
   }
 
   MessageRx_ClearCapture();
   if (msg_rs_symbol_index >= RS_TOTAL_CODEWORD_SYMBOLS)
   {
-    printf("rx RS codeword complete, slot erasures=%u, soft_fallbacks=%u, vote_overrides=%u\r\n",
-           msg_rs_erasure_count, msg_soft_fallback_count, msg_vote_override_count);
+    printf("rx RS codeword complete, slot erasures=%u, soft_fallbacks=%u, low_confidence=%u, vote_overrides=%u\r\n",
+           msg_rs_erasure_count, msg_soft_fallback_count,
+           msg_low_confidence_count, msg_vote_override_count);
   }
 }
 
@@ -1844,6 +2452,8 @@ static void MessageRx_AcceptSymbol(const FSK_DetectResult *result, uint32_t now)
           memset(msg_preamble_recovery_energy, 0, sizeof(msg_preamble_recovery_energy));
           memset(msg_preamble_recovery_start_energy, 0,
                  sizeof(msg_preamble_recovery_start_energy));
+          memset(msg_preamble_recovery_start_bits, 0,
+                 sizeof(msg_preamble_recovery_start_bits));
           msg_preamble_recovery_energy[0] = msg_preamble_energy[0];
           msg_preamble_recovery_energy[1] = result->data_energy[1];
           msg_preamble_recovery_tick = now;
@@ -1856,6 +2466,12 @@ static void MessageRx_AcceptSymbol(const FSK_DetectResult *result, uint32_t now)
         {
           msg_preamble_index = 0U;
           msg_preamble_recovery_active = 0U;
+          /* Multi-node mode has no startup calibration.  Apply the four-tone
+             PREAMBLE normalization before decoding source/destination, or a
+             weak address frequency can be missed and RS data can be consumed
+             as the address.  Keep this scale for the remainder of the frame. */
+          msg_preamble_capture_active = 0U;
+          MessageRx_ApplyPreambleFrameScale();
           msg_start_entry_tick = now;
           msg_rx_state = MSG_RX_START_0;
           printf("rx preamble ok\r\n");
@@ -1888,58 +2504,72 @@ static void MessageRx_AcceptSymbol(const FSK_DetectResult *result, uint32_t now)
       break;
 
     case MSG_RX_START_0:
-      if (bits == msg_start[0])
+      if (bits < 3U)
       {
+        msg_rx_source_id = Node_IdFromSourceBits(bits);
         msg_preamble_capture_active = 0U;
         msg_rx_state = MSG_RX_START_1;
-        printf("rx start0 ok\r\n");
+        printf("rx address source: bits=%s -> N%u\r\n",
+               FSK_BitsToString(bits), msg_rx_source_id);
       }
       else if ((bits == msg_preamble[MSG_PREAMBLE_LEN - 1U]) ||
                (bits == FSK_SYNC_SYMBOL))
       {
         /* A strong 4500 Hz PREAMBLE tail can survive into the first START
-           window.  Keep waiting for 2500 Hz instead of discarding a frame
-           whose complete PREAMBLE has already been verified. */
+           window.  Source IDs deliberately use only 00/01/10, so 11 remains
+           available as an unambiguous transition guard. */
         printf("rx start0 transition ignored: got=%s\r\n",
                FSK_BitsToString(bits));
       }
       else
       {
-        printf("rx start0 fail: got=%s expected=%s\r\n",
-               FSK_BitsToString(bits), FSK_BitsToString(msg_start[0]));
+        printf("rx source address fail: got=%s\r\n", FSK_BitsToString(bits));
         MessageRx_ResetFrame();
       }
       break;
 
     case MSG_RX_START_1:
-      if (bits == msg_start[1])
+      if (bits < 4U)
       {
-        MessageRx_ApplyPreambleEnergyScale();
+        msg_rx_destination_id = bits;
         msg_rs_symbol_index = 0U;
         msg_rs_fsk_index = 0U;
         msg_rs_symbol = 0U;
         msg_rs_current_erased = 0U;
+        msg_rs_current_reliability = RS_VOTE_RATIO_CAP;
         msg_rs_erasure_count = 0U;
         msg_soft_fallback_count = 0U;
+        msg_low_confidence_count = 0U;
         msg_vote_override_count = 0U;
+        msg_worst_decision_count = 0U;
+        memset(msg_worst_decisions, 0, sizeof(msg_worst_decisions));
         msg_marker_tick = 0U;
         msg_start_entry_tick = 0U;
         MessageRx_ClearCapture();
         memset(msg_rs_codeword, 0, sizeof(msg_rs_codeword));
+        memset(msg_rs_codeword_erased, 0, sizeof(msg_rs_codeword_erased));
+        memset(msg_rs_codeword_reliability, 0, sizeof(msg_rs_codeword_reliability));
         msg_rx_state = MSG_RX_RS_SYNC;
-        printf("rx start ok, receiving %ux marker-framed RS(%u,%u) blocks\r\n",
-               RS_BLOCK_COUNT, RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS);
+        if (msg_rx_destination_id == 0U)
+        {
+          printf("rx route: N%u->ALL, receiving %ux marker-framed RS(%u,%u) blocks\r\n",
+                 msg_rx_source_id, RS_BLOCK_COUNT, RS_CODEWORD_SYMBOLS,
+                 RS_DATA_SYMBOLS);
+        }
+        else
+        {
+          printf("rx route: N%u->N%u, receiving %ux marker-framed RS(%u,%u) blocks\r\n",
+                 msg_rx_source_id, msg_rx_destination_id, RS_BLOCK_COUNT,
+                 RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS);
+        }
       }
-      else if ((bits == msg_start[0]) || (bits == FSK_SYNC_SYMBOL))
+      else if (bits == FSK_SYNC_SYMBOL)
       {
-        /* Apply the same transition tolerance between START0 and START1. */
-        printf("rx start1 transition ignored: got=%s\r\n",
-               FSK_BitsToString(bits));
+        printf("rx destination transition marker ignored\r\n");
       }
       else
       {
-        printf("rx start1 fail: got=%s expected=%s\r\n",
-               FSK_BitsToString(bits), FSK_BitsToString(msg_start[1]));
+        printf("rx destination address fail: got=%s\r\n", FSK_BitsToString(bits));
         MessageRx_ResetFrame();
       }
       break;
@@ -2028,87 +2658,188 @@ static void MessageRx_AcceptSymbol(const FSK_DetectResult *result, uint32_t now)
       }
       else if (bits == msg_end[1])
       {
-        uint8_t total_corrected = 0U;
-        uint8_t all_blocks_ok = 1U;
+        uint8_t received_codewords[RS_TOTAL_CODEWORD_SYMBOLS];
+        uint8_t candidate0[RS_CODEWORD_SYMBOLS];
+        uint8_t candidate1[RS_CODEWORD_SYMBOLS];
+        uint8_t selected_corrected[RS_BLOCK_COUNT] = {0};
+        uint8_t selected_erasures[RS_BLOCK_COUNT] = {0};
+        uint8_t selected_adaptive[RS_BLOCK_COUNT] = {0};
+        uint8_t selected = 0U;
+        uint8_t rs_pair_seen = 0U;
+        uint8_t crc_failure_seen = 0U;
+        uint8_t format_failure_seen = 0U;
+        uint8_t failure_index = 0U;
+        uint8_t failure_code = 0U;
+        uint8_t saved_failure_index = 0U;
+        uint8_t saved_failure_code = 0U;
+        uint16_t received_crc = 0U;
+        uint16_t calculated_crc = 0U;
+        uint16_t saved_received_crc = 0U;
+        uint16_t saved_calculated_crc = 0U;
+        MessagePayloadStatus payload_status = MESSAGE_PAYLOAD_CRC_FAIL;
+        MessagePayloadStatus saved_format_status = MESSAGE_PAYLOAD_OK;
 
         printf("rx end ok\r\n");
-        for (uint8_t block = 0U; block < RS_BLOCK_COUNT; block++)
-        {
-          uint8_t corrected = 0U;
-          int8_t decode_status = RS_Decode(&msg_rs_codeword[block * RS_CODEWORD_SYMBOLS],
-                                           &corrected);
+        memcpy(received_codewords, msg_rs_codeword,
+               sizeof(received_codewords));
 
-          if (decode_status < 0)
+        /* Search in increasing total added erasures.  A syndrome-valid pair
+           is accepted only if its CRC and payload structure both pass. */
+        for (uint8_t total_add = 0U;
+             (total_add <= (RS_PARITY_SYMBOLS * RS_BLOCK_COUNT)) &&
+             (selected == 0U);
+             total_add++)
+        {
+          for (uint8_t add0 = 0U;
+               (add0 <= RS_PARITY_SYMBOLS) && (add0 <= total_add);
+               add0++)
           {
-            all_blocks_ok = 0U;
-            printf("rs block %u/%u fail: more than %u symbol errors\r\n",
-                   block + 1U, RS_BLOCK_COUNT, RS_CORRECTABLE_SYMBOLS);
-          }
-          else
-          {
-            total_corrected = (uint8_t)(total_corrected + corrected);
-            printf("rs block %u/%u ok: corrected=%u/%u\r\n",
-                   block + 1U, RS_BLOCK_COUNT, corrected, RS_CORRECTABLE_SYMBOLS);
+            uint8_t add1 = (uint8_t)(total_add - add0);
+            uint8_t corrected0 = 0U;
+            uint8_t corrected1 = 0U;
+            uint8_t erasures0 = 0U;
+            uint8_t erasures1 = 0U;
+
+            if (add1 > RS_PARITY_SYMBOLS)
+            {
+              continue;
+            }
+            if (RS_DecodeAdaptiveAttempt(&received_codewords[0],
+                                         &msg_rs_codeword_erased[0],
+                                         &msg_rs_codeword_reliability[0],
+                                         add0, candidate0, &corrected0,
+                                         &erasures0) < 0)
+            {
+              continue;
+            }
+            if (RS_DecodeAdaptiveAttempt(
+                    &received_codewords[RS_CODEWORD_SYMBOLS],
+                    &msg_rs_codeword_erased[RS_CODEWORD_SYMBOLS],
+                    &msg_rs_codeword_reliability[RS_CODEWORD_SYMBOLS],
+                    add1, candidate1, &corrected1, &erasures1) < 0)
+            {
+              continue;
+            }
+
+            rs_pair_seen = 1U;
+            memcpy(&msg_rs_codeword[0], candidate0, RS_CODEWORD_SYMBOLS);
+            memcpy(&msg_rs_codeword[RS_CODEWORD_SYMBOLS], candidate1,
+                   RS_CODEWORD_SYMBOLS);
+            payload_status = Message_ValidateRsPayload(
+                msg_rs_codeword, msg_rx_source_id, msg_rx_destination_id,
+                rx_message, &rx_message_len,
+                &received_crc, &calculated_crc, &failure_index,
+                &failure_code);
+            if (payload_status == MESSAGE_PAYLOAD_OK)
+            {
+              selected_corrected[0] = corrected0;
+              selected_corrected[1] = corrected1;
+              selected_erasures[0] = erasures0;
+              selected_erasures[1] = erasures1;
+              selected_adaptive[0] = add0;
+              selected_adaptive[1] = add1;
+              selected = 1U;
+              break;
+            }
+            if (payload_status == MESSAGE_PAYLOAD_CRC_FAIL)
+            {
+              crc_failure_seen = 1U;
+              saved_received_crc = received_crc;
+              saved_calculated_crc = calculated_crc;
+            }
+            else
+            {
+              format_failure_seen = 1U;
+              saved_format_status = payload_status;
+              saved_failure_index = failure_index;
+              saved_failure_code = failure_code;
+            }
           }
         }
 
-        if (all_blocks_ok != 0U)
+        if (selected != 0U)
         {
-          uint8_t valid_text = 1U;
-          uint8_t pad_seen = 0U;
+          uint8_t total_corrected =
+              (uint8_t)(selected_corrected[0] + selected_corrected[1]);
+          uint8_t total_decode_erasures =
+              (uint8_t)(selected_erasures[0] + selected_erasures[1]);
+          uint8_t total_adaptive_erasures =
+              (uint8_t)(selected_adaptive[0] + selected_adaptive[1]);
 
-          rx_message_len = 0U;
-          for (uint8_t i = 0U; i < RS_TOTAL_DATA_SYMBOLS; i++)
+          for (uint8_t block = 0U; block < RS_BLOCK_COUNT; block++)
           {
-            uint8_t block = (uint8_t)(i / RS_DATA_SYMBOLS);
-            uint8_t block_index = (uint8_t)(i % RS_DATA_SYMBOLS);
-            uint8_t code = msg_rs_codeword[(block * RS_CODEWORD_SYMBOLS) + block_index];
-
-            if (code == RS_PAD_VALUE)
-            {
-              pad_seen = 1U;
-              continue;
-            }
-            if (pad_seen != 0U)
-            {
-              valid_text = 0U;
-              printf("rx RS payload fail: data after padding at %u\r\n", i);
-              break;
-            }
-
-            char ch = Message_CodeToChar(code);
-            if (ch == 0)
-            {
-              valid_text = 0U;
-              printf("rx RS payload fail: invalid character code %u at %u\r\n", code, i);
-              break;
-            }
-            rx_message[rx_message_len++] = ch;
+            printf("rs block %u/%u ok: erasures=%u (GMD +%u) corrected_total=%u capacity=2e+s<=%u\r\n",
+                   block + 1U, RS_BLOCK_COUNT, selected_erasures[block],
+                   selected_adaptive[block], selected_corrected[block],
+                   RS_PARITY_SYMBOLS);
           }
-          rx_message[rx_message_len] = '\0';
-
-          if ((valid_text != 0U) && (rx_message_len > 0U))
+          printf("CRC12 ok: route=N%u->%s received=calculated=0x%03X\r\n",
+                 msg_rx_source_id,
+                 Node_DestinationLabel(msg_rx_destination_id), received_crc);
+          printf("rs decode ok: corrected_locations=%u, slot_erasures=%u, decode_erasures=%u (GMD +%u), rule=2e+s<=%u/block\r\n",
+                 total_corrected, msg_rs_erasure_count, total_decode_erasures,
+                 total_adaptive_erasures, RS_PARITY_SYMBOLS);
+          if (local_node_id == 0U)
+          {
+            printf("message ignored: local node ID unset; press RX key 1/2/3\r\n");
+          }
+          else if ((msg_rx_destination_id != 0U) &&
+                   (msg_rx_destination_id != local_node_id))
+          {
+            printf("message ignored: addressed to N%u, local=N%u\r\n",
+                   msg_rx_destination_id, local_node_id);
+          }
+          else
           {
             rx_message_valid = 1U;
+            rx_message_source_id = msg_rx_source_id;
+            rx_message_destination_id = msg_rx_destination_id;
             rx_rs_corrected = total_corrected;
             memcpy(message_store_pending_text, rx_message, rx_message_len + 1U);
             message_store_pending_len = rx_message_len;
+            message_store_pending_source = msg_rx_source_id;
+            message_store_pending_destination = msg_rx_destination_id;
             message_store_pending = 1U;
             message_store_last_save_failed = 0U;
             StatusLed_NotifyRxComplete();
-            printf("rs decode ok: corrected=%u/%u, slot_erasures=%u\r\n",
-                    total_corrected, RS_TOTAL_CORRECTABLE, msg_rs_erasure_count);
-            printf("message_ok: len=%u text=\"%s\"\r\n", rx_message_len, rx_message);
+            printf("message_ok: N%u->%s len=%u text=\"%s\"\r\n",
+                   msg_rx_source_id,
+                   Node_DestinationLabel(msg_rx_destination_id),
+                   rx_message_len, rx_message);
           }
-          else
-          {
-            printf("message fail: invalid RS payload\r\n");
-          }
+        }
+        else if (rs_pair_seen == 0U)
+        {
+          printf("rs decode fail: no block pair satisfied 2e+s<=%u\r\n",
+                 RS_PARITY_SYMBOLS);
+          MessageRx_PrintDecisionDiagnostics();
         }
         else
         {
-          printf("rs decode fail: one or more RS blocks exceeded t=%u\r\n",
-                 RS_CORRECTABLE_SYMBOLS);
+          if (crc_failure_seen != 0U)
+          {
+            printf("message CRC12 fail: no GMD candidate matched, last received=0x%03X calculated=0x%03X\r\n",
+                   saved_received_crc, saved_calculated_crc);
+          }
+          if (format_failure_seen != 0U)
+          {
+            if (saved_format_status == MESSAGE_PAYLOAD_DATA_AFTER_PAD)
+            {
+              printf("rx payload format fail: data 0x%02X after padding at %u\r\n",
+                     saved_failure_code, saved_failure_index);
+            }
+            else if (saved_format_status == MESSAGE_PAYLOAD_INVALID_CODE)
+            {
+              printf("rx payload format fail: invalid code %u at %u\r\n",
+                     saved_failure_code, saved_failure_index);
+            }
+            else
+            {
+              printf("rx payload format fail: empty message\r\n");
+            }
+          }
+          printf("message fail: all syndrome-valid GMD candidates rejected by CRC/payload\r\n");
+          MessageRx_PrintDecisionDiagnostics();
         }
       }
       else if (bits == msg_end[0])
@@ -2131,6 +2862,7 @@ static void MessageRx_AcceptSymbol(const FSK_DetectResult *result, uint32_t now)
 
 static void MessageRx_ResetFrame(void)
 {
+  MessageRx_RestoreCalibrationEnergyScale();
   msg_rx_state = MSG_RX_SEARCH;
   msg_preamble_index = 0U;
   msg_start_entry_tick = 0U;
@@ -2141,15 +2873,26 @@ static void MessageRx_ResetFrame(void)
   memset(msg_preamble_recovery_energy, 0, sizeof(msg_preamble_recovery_energy));
   memset(msg_preamble_recovery_start_energy, 0,
          sizeof(msg_preamble_recovery_start_energy));
+  memset(msg_preamble_recovery_start_bits, 0,
+         sizeof(msg_preamble_recovery_start_bits));
+  msg_rx_source_id = 0U;
+  msg_rx_destination_id = 0U;
   msg_rs_symbol_index = 0U;
   msg_rs_fsk_index = 0U;
   msg_rs_symbol = 0U;
   msg_rs_current_erased = 0U;
+  msg_rs_current_reliability = RS_VOTE_RATIO_CAP;
   msg_rs_erasure_count = 0U;
   msg_soft_fallback_count = 0U;
+  msg_low_confidence_count = 0U;
   msg_vote_override_count = 0U;
+  msg_worst_decision_count = 0U;
+  memset(msg_worst_decisions, 0, sizeof(msg_worst_decisions));
   msg_marker_tick = 0U;
   MessageRx_ClearCapture();
+  memset(msg_rs_codeword, 0, sizeof(msg_rs_codeword));
+  memset(msg_rs_codeword_erased, 0, sizeof(msg_rs_codeword_erased));
+  memset(msg_rs_codeword_reliability, 0, sizeof(msg_rs_codeword_reliability));
   msg_frame_tick = 0U;
 }
 
@@ -2157,6 +2900,58 @@ static uint8_t Message_WhiteningMask(uint16_t fsk_symbol_index)
 {
   static const uint8_t mask_cycle[4] = {0x00U, 0x01U, 0x02U, 0x03U};
   return mask_cycle[fsk_symbol_index & 0x03U];
+}
+
+static uint8_t Node_SourceBitsFromId(uint8_t node_id)
+{
+  return ((node_id >= 1U) && (node_id <= 3U)) ?
+         (uint8_t)(node_id - 1U) : 0x03U;
+}
+
+static uint8_t Node_IdFromSourceBits(uint8_t bits)
+{
+  return (bits < 3U) ? (uint8_t)(bits + 1U) : 0U;
+}
+
+static const char *Node_DestinationLabel(uint8_t destination)
+{
+  static const char *labels[4U] = {"ALL", "N1", "N2", "N3"};
+  return (destination < 4U) ? labels[destination] : "?";
+}
+
+static void Node_SetLocalId(uint8_t node_id)
+{
+  if ((node_id < 1U) || (node_id > 3U))
+  {
+    return;
+  }
+  local_node_id = node_id;
+  if (tx_destination_id == local_node_id)
+  {
+    tx_destination_id = 0U;
+  }
+  printf("node configured: local=N%u, destination=%s; RX keys 1/2/3=set local, D=cycle destination\r\n",
+         local_node_id, Node_DestinationLabel(tx_destination_id));
+  OLED_PrintRxStatus();
+}
+
+static void Node_CycleDestination(void)
+{
+  do
+  {
+    tx_destination_id = (uint8_t)((tx_destination_id + 1U) & 0x03U);
+  }
+  while ((local_node_id != 0U) && (tx_destination_id == local_node_id));
+
+  if (tx_destination_id == 0U)
+  {
+    printf("destination: ALL (broadcast)\r\n");
+  }
+  else
+  {
+    printf("destination: N%u\r\n", tx_destination_id);
+  }
+  OLED_PrintRxStatus();
 }
 
 static uint8_t Message_CharToCode(char ch)
@@ -2203,6 +2998,124 @@ static char Message_CodeToChar(uint8_t code)
   }
 }
 
+/* CRC-12/3GPP polynomial x^12+x^11+x^3+x^2+x+1 (0x80F),
+   initialized to zero and fed MSB-first over each 6-bit payload symbol. */
+static uint16_t Message_Crc12Symbols(const uint8_t *symbols, uint8_t count)
+{
+  uint16_t crc = 0U;
+
+  for (uint8_t i = 0U; i < count; i++)
+  {
+    uint8_t symbol = (uint8_t)(symbols[i] & RS_FIELD_ORDER);
+
+    for (uint8_t mask = 0x20U; mask != 0U; mask >>= 1U)
+    {
+      uint8_t feedback = (uint8_t)(((crc >> 11U) ^
+                                    ((symbol & mask) != 0U ? 1U : 0U)) & 1U);
+      crc = (uint16_t)((crc << 1U) & MESSAGE_CRC12_MASK);
+      if (feedback != 0U)
+      {
+        crc ^= MESSAGE_CRC12_POLY;
+      }
+    }
+  }
+  return (uint16_t)(crc & MESSAGE_CRC12_MASK);
+}
+
+static uint16_t Message_Crc12Addressed(uint8_t source, uint8_t destination,
+                                      const uint8_t *symbols, uint8_t count)
+{
+  uint8_t addressed_symbols[MESSAGE_MAX_LEN + 2U];
+
+  addressed_symbols[0] = (uint8_t)(source & 0x03U);
+  addressed_symbols[1] = (uint8_t)(destination & 0x03U);
+  memcpy(&addressed_symbols[2], symbols, count);
+  return Message_Crc12Symbols(addressed_symbols, (uint8_t)(count + 2U));
+}
+
+static uint8_t Message_CrcSelfTest(void)
+{
+  uint8_t symbols[MESSAGE_MAX_LEN];
+
+  for (uint8_t i = 0U; i < MESSAGE_MAX_LEN; i++)
+  {
+    symbols[i] = i;
+  }
+  return ((Message_Crc12Symbols(symbols, MESSAGE_MAX_LEN) == 0x0708U) &&
+          (Message_Crc12Addressed(1U, 2U, symbols, MESSAGE_MAX_LEN) == 0x0780U)) ?
+         1U : 0U;
+}
+
+static MessagePayloadStatus Message_ValidateRsPayload(const uint8_t *codewords,
+                                                       uint8_t source,
+                                                       uint8_t destination,
+                                                       char *text,
+                                                       uint8_t *text_len,
+                                                       uint16_t *received_crc,
+                                                       uint16_t *calculated_crc,
+                                                       uint8_t *failure_index,
+                                                       uint8_t *failure_code)
+{
+  uint8_t data[RS_TOTAL_DATA_SYMBOLS];
+  uint8_t pad_seen = 0U;
+
+  *text_len = 0U;
+  *failure_index = 0U;
+  *failure_code = 0U;
+  for (uint8_t i = 0U; i < RS_TOTAL_DATA_SYMBOLS; i++)
+  {
+    uint8_t block = (uint8_t)(i / RS_DATA_SYMBOLS);
+    uint8_t block_index = (uint8_t)(i % RS_DATA_SYMBOLS);
+    data[i] = codewords[(block * RS_CODEWORD_SYMBOLS) + block_index];
+  }
+
+  *calculated_crc = Message_Crc12Addressed(source, destination,
+                                           data, MESSAGE_MAX_LEN);
+  *received_crc = (uint16_t)(((uint16_t)data[MESSAGE_MAX_LEN] << 6U) |
+                             data[MESSAGE_MAX_LEN + 1U]);
+  if (*received_crc != *calculated_crc)
+  {
+    text[0] = '\0';
+    return MESSAGE_PAYLOAD_CRC_FAIL;
+  }
+
+  for (uint8_t i = 0U; i < MESSAGE_MAX_LEN; i++)
+  {
+    uint8_t code = data[i];
+
+    if (code == RS_PAD_VALUE)
+    {
+      pad_seen = 1U;
+      continue;
+    }
+    if (pad_seen != 0U)
+    {
+      *failure_index = i;
+      *failure_code = code;
+      text[0] = '\0';
+      return MESSAGE_PAYLOAD_DATA_AFTER_PAD;
+    }
+
+    {
+      char ch = Message_CodeToChar(code);
+      if (ch == 0)
+      {
+        *failure_index = i;
+        *failure_code = code;
+        text[0] = '\0';
+        return MESSAGE_PAYLOAD_INVALID_CODE;
+      }
+      text[(*text_len)++] = ch;
+    }
+  }
+  text[*text_len] = '\0';
+  if (*text_len == 0U)
+  {
+    return MESSAGE_PAYLOAD_EMPTY;
+  }
+  return MESSAGE_PAYLOAD_OK;
+}
+
 static uint32_t MessageStore_HashRecord(const MessageStoreRecord *record)
 {
   const uint8_t *data = (const uint8_t *)&record->sequence;
@@ -2215,6 +3128,21 @@ static uint32_t MessageStore_HashRecord(const MessageStoreRecord *record)
     hash *= 16777619UL;
   }
   return hash;
+}
+
+static uint8_t MessageStore_RecordLength(const MessageStoreRecord *record)
+{
+  return (uint8_t)(record->length & MESSAGE_STORE_LENGTH_MASK);
+}
+
+static uint8_t MessageStore_RecordSource(const MessageStoreRecord *record)
+{
+  return (uint8_t)((record->length >> MESSAGE_STORE_SOURCE_SHIFT) & 0x03U);
+}
+
+static uint8_t MessageStore_RecordDestination(const MessageStoreRecord *record)
+{
+  return (uint8_t)((record->length >> MESSAGE_STORE_DEST_SHIFT) & 0x03U);
 }
 
 static uint8_t MessageStore_RecordIsErased(uint32_t address)
@@ -2234,16 +3162,21 @@ static uint8_t MessageStore_RecordIsErased(uint32_t address)
 
 static uint8_t MessageStore_RecordValid(const MessageStoreRecord *record)
 {
+  uint8_t len = MessageStore_RecordLength(record);
+  uint8_t source = MessageStore_RecordSource(record);
+
   if ((record->magic != MESSAGE_STORE_MAGIC) ||
       (record->commit != MESSAGE_STORE_COMMIT) ||
-      (record->length == 0U) ||
-      (record->length > MESSAGE_MAX_LEN) ||
+      (len == 0U) || (len > MESSAGE_MAX_LEN) ||
+      (source > 3U) ||
+      ((record->length & ~(MESSAGE_STORE_LENGTH_MASK |
+                           MESSAGE_STORE_ROUTE_MASK)) != 0U) ||
       (record->hash != MessageStore_HashRecord(record)))
   {
     return 0U;
   }
 
-  for (uint8_t i = 0U; i < (uint8_t)record->length; i++)
+  for (uint8_t i = 0U; i < len; i++)
   {
     if (Message_CharToCode((char)record->text[i]) == MESSAGE_CODE_INVALID)
     {
@@ -2253,7 +3186,8 @@ static uint8_t MessageStore_RecordValid(const MessageStoreRecord *record)
   return 1U;
 }
 
-static void MessageStore_CacheAppend(uint32_t sequence, const char *text, uint8_t len)
+static void MessageStore_CacheAppend(uint32_t sequence, const char *text, uint8_t len,
+                                     uint8_t source, uint8_t destination)
 {
   uint8_t index;
 
@@ -2273,18 +3207,23 @@ static void MessageStore_CacheAppend(uint32_t sequence, const char *text, uint8_
 
   message_store_cache[index].sequence = sequence;
   message_store_cache[index].len = len;
+  message_store_cache[index].source = source;
+  message_store_cache[index].destination = destination;
   memcpy(message_store_cache[index].text, text, len);
   message_store_cache[index].text[len] = '\0';
   message_store_view_index = message_store_count - 1U;
 }
 
 static void MessageStore_BuildRecord(MessageStoreRecord *record, uint32_t sequence,
-                                     const char *text, uint8_t len)
+                                     const char *text, uint8_t len,
+                                     uint8_t source, uint8_t destination)
 {
   memset(record, 0, sizeof(*record));
   record->magic = MESSAGE_STORE_MAGIC;
   record->sequence = sequence;
-  record->length = len;
+  record->length = (uint32_t)len |
+                   ((uint32_t)(source & 0x03U) << MESSAGE_STORE_SOURCE_SHIFT) |
+                   ((uint32_t)(destination & 0x03U) << MESSAGE_STORE_DEST_SHIFT);
   memcpy(record->text, text, len);
   record->hash = MessageStore_HashRecord(record);
   record->commit = MESSAGE_STORE_COMMIT;
@@ -2340,7 +3279,9 @@ static uint8_t MessageStore_CompactUnlocked(void)
     MessageStore_BuildRecord(&record,
                              message_store_cache[i].sequence,
                              message_store_cache[i].text,
-                             message_store_cache[i].len);
+                             message_store_cache[i].len,
+                             message_store_cache[i].source,
+                             message_store_cache[i].destination);
     if (MessageStore_ProgramRecordUnlocked(message_store_write_address, &record) == 0U)
     {
       return 0U;
@@ -2374,7 +3315,9 @@ static void MessageStore_Init(void)
     if (MessageStore_RecordValid(&record) != 0U)
     {
       MessageStore_CacheAppend(record.sequence, (const char *)record.text,
-                               (uint8_t)record.length);
+                               MessageStore_RecordLength(&record),
+                               MessageStore_RecordSource(&record),
+                               MessageStore_RecordDestination(&record));
       if (record.sequence > max_sequence)
       {
         max_sequence = record.sequence;
@@ -2393,19 +3336,21 @@ static void MessageStore_Init(void)
          (unsigned long)message_store_write_address);
 }
 
-static uint8_t MessageStore_Save(const char *text, uint8_t len)
+static uint8_t MessageStore_Save(const char *text, uint8_t len,
+                                 uint8_t source, uint8_t destination)
 {
   MessageStoreRecord record;
   uint32_t sequence;
   uint8_t saved;
 
-  if ((len == 0U) || (len > MESSAGE_MAX_LEN))
+  if ((len == 0U) || (len > MESSAGE_MAX_LEN) ||
+      (source < 1U) || (source > 3U) || (destination > 3U))
   {
     return 0U;
   }
 
   sequence = message_store_next_sequence;
-  MessageStore_BuildRecord(&record, sequence, text, len);
+  MessageStore_BuildRecord(&record, sequence, text, len, source, destination);
 
   if (HAL_FLASH_Unlock() != HAL_OK)
   {
@@ -2431,7 +3376,7 @@ static uint8_t MessageStore_Save(const char *text, uint8_t len)
   }
 
   message_store_write_address += sizeof(MessageStoreRecord);
-  MessageStore_CacheAppend(sequence, text, len);
+  MessageStore_CacheAppend(sequence, text, len, source, destination);
   message_store_next_sequence = sequence + 1U;
   if (message_store_next_sequence == 0U)
   {
@@ -2456,17 +3401,23 @@ static void MessageStore_Task(void)
     RX_StopSampling();
   }
 
-  saved = MessageStore_Save(message_store_pending_text, message_store_pending_len);
+  saved = MessageStore_Save(message_store_pending_text, message_store_pending_len,
+                            message_store_pending_source,
+                            message_store_pending_destination);
   message_store_pending = 0U;
   message_store_pending_len = 0U;
+  message_store_pending_source = 0U;
+  message_store_pending_destination = 0U;
 
   message_store_last_save_failed = (saved != 0U) ? 0U : 1U;
   if (saved != 0U)
   {
-    printf("message stored: item=%u/%u seq=%lu len=%u\r\n",
+    printf("message stored: item=%u/%u seq=%lu route=N%u->%s len=%u\r\n",
            message_store_view_index + 1U,
            message_store_count,
            (unsigned long)message_store_cache[message_store_view_index].sequence,
+           message_store_cache[message_store_view_index].source,
+           Node_DestinationLabel(message_store_cache[message_store_view_index].destination),
            message_store_cache[message_store_view_index].len);
   }
   else
@@ -2525,10 +3476,13 @@ static void MessageStore_HandleRxKey(char key)
   }
 
   message_store_last_save_failed = 0U;
-  printf("memory view: item=%u/%u seq=%lu len=%u text=\"%s\"\r\n",
+  printf("memory view: item=%u/%u seq=%lu route=%s%u->%s len=%u text=\"%s\"\r\n",
          message_store_view_index + 1U,
          message_store_count,
          (unsigned long)message_store_cache[message_store_view_index].sequence,
+         (message_store_cache[message_store_view_index].source == 0U) ? "OLD" : "N",
+         message_store_cache[message_store_view_index].source,
+         Node_DestinationLabel(message_store_cache[message_store_view_index].destination),
          message_store_cache[message_store_view_index].len,
          message_store_cache[message_store_view_index].text);
   OLED_PrintRxStatus();
@@ -2654,22 +3608,100 @@ static void RS_Encode(const uint8_t *data, uint8_t *codeword)
   memcpy(&codeword[RS_DATA_SYMBOLS], &work[RS_DATA_SYMBOLS], RS_PARITY_SYMBOLS);
 }
 
-static int8_t RS_Decode(uint8_t *codeword, uint8_t *corrected_count)
+static uint8_t RS_FindErrorLocator(const uint8_t *syndromes, uint8_t syndrome_count,
+                                   uint8_t *locator, uint8_t *locator_degree)
 {
-  uint8_t syndromes[RS_PARITY_SYMBOLS] = {0};
-  uint8_t locator[RS_PARITY_SYMBOLS + 1U] = {0};
   uint8_t previous[RS_PARITY_SYMBOLS + 1U] = {0};
   uint8_t saved[RS_PARITY_SYMBOLS + 1U];
-  uint8_t error_positions[RS_CORRECTABLE_SYMBOLS];
-  uint8_t error_locations[RS_CORRECTABLE_SYMBOLS];
-  uint8_t matrix[RS_CORRECTABLE_SYMBOLS][RS_CORRECTABLE_SYMBOLS + 1U];
-  uint8_t locator_degree = 0U;
+  uint8_t degree = 0U;
   uint8_t shift = 1U;
   uint8_t previous_discrepancy = 1U;
+
+  memset(locator, 0, RS_PARITY_SYMBOLS + 1U);
+  locator[0] = 1U;
+  previous[0] = 1U;
+
+  for (uint8_t step = 0U; step < syndrome_count; step++)
+  {
+    uint8_t discrepancy = syndromes[step];
+
+    for (uint8_t i = 1U; i <= degree; i++)
+    {
+      discrepancy ^= RS_GfMul(locator[i], syndromes[step - i]);
+    }
+    if (discrepancy == 0U)
+    {
+      shift++;
+      continue;
+    }
+
+    memcpy(saved, locator, RS_PARITY_SYMBOLS + 1U);
+    {
+      uint8_t scale = RS_GfDiv(discrepancy, previous_discrepancy);
+      for (uint8_t i = 0U; (uint16_t)i + shift <= RS_PARITY_SYMBOLS; i++)
+      {
+        locator[i + shift] ^= RS_GfMul(scale, previous[i]);
+      }
+    }
+
+    if ((uint8_t)(2U * degree) <= step)
+    {
+      degree = (uint8_t)(step + 1U - degree);
+      memcpy(previous, saved, RS_PARITY_SYMBOLS + 1U);
+      previous_discrepancy = discrepancy;
+      shift = 1U;
+    }
+    else
+    {
+      shift++;
+    }
+  }
+
+  *locator_degree = degree;
+  return 1U;
+}
+
+static int8_t RS_Decode(uint8_t *codeword, const uint8_t *erasure_positions,
+                        uint8_t erasure_count, uint8_t *corrected_count)
+{
+  uint8_t syndromes[RS_PARITY_SYMBOLS] = {0};
+  uint8_t forney_syndromes[RS_PARITY_SYMBOLS] = {0};
+  uint8_t erasure_locator[RS_PARITY_SYMBOLS + 1U] = {0};
+  uint8_t error_locator[RS_PARITY_SYMBOLS + 1U] = {0};
+  uint8_t locator[RS_PARITY_SYMBOLS + 1U] = {0};
+  uint8_t error_positions[RS_PARITY_SYMBOLS];
+  uint8_t error_locations[RS_PARITY_SYMBOLS];
+  uint8_t matrix[RS_PARITY_SYMBOLS][RS_PARITY_SYMBOLS + 1U];
+  uint8_t forney_count = RS_PARITY_SYMBOLS;
+  uint8_t erasure_degree = 0U;
+  uint8_t unknown_error_degree = 0U;
+  uint8_t locator_degree;
   uint8_t error_count = 0U;
   uint8_t has_error = 0U;
 
+  if ((corrected_count == NULL) ||
+      (erasure_count > RS_PARITY_SYMBOLS) ||
+      ((erasure_count > 0U) && (erasure_positions == NULL)))
+  {
+    return -1;
+  }
   *corrected_count = 0U;
+
+  for (uint8_t i = 0U; i < erasure_count; i++)
+  {
+    if (erasure_positions[i] >= RS_CODEWORD_SYMBOLS)
+    {
+      return -1;
+    }
+    for (uint8_t j = 0U; j < i; j++)
+    {
+      if (erasure_positions[i] == erasure_positions[j])
+      {
+        return -1;
+      }
+    }
+  }
+
   RS_CalculateSyndromes(codeword, syndromes);
   for (uint8_t i = 0U; i < RS_PARITY_SYMBOLS; i++)
   {
@@ -2680,47 +3712,57 @@ static int8_t RS_Decode(uint8_t *codeword, uint8_t *corrected_count)
     return 0;
   }
 
-  locator[0] = 1U;
-  previous[0] = 1U;
-
-  for (uint8_t step = 0U; step < RS_PARITY_SYMBOLS; step++)
+  memcpy(forney_syndromes, syndromes, sizeof(forney_syndromes));
+  erasure_locator[0] = 1U;
+  for (uint8_t erasure = 0U; erasure < erasure_count; erasure++)
   {
-    uint8_t discrepancy = syndromes[step];
+    uint8_t location = (uint8_t)(RS_CODEWORD_SYMBOLS - 1U - erasure_positions[erasure]);
+    uint8_t x = rs_gf_exp[location];
 
-    for (uint8_t i = 1U; i <= locator_degree; i++)
+    for (int16_t i = (int16_t)erasure_degree; i >= 0; i--)
     {
-      discrepancy ^= RS_GfMul(locator[i], syndromes[step - i]);
+      erasure_locator[i + 1] ^= RS_GfMul(erasure_locator[i], x);
     }
+    erasure_degree++;
 
-    if (discrepancy == 0U)
+    /* Remove this known erasure from the syndrome sequence.  The remaining
+       sequence contains only unknown errors, so ordinary Berlekamp-Massey
+       can find their locator without spending two parity symbols per erasure. */
+    for (uint8_t i = 0U; (uint8_t)(i + 1U) < forney_count; i++)
     {
-      shift++;
-      continue;
+      forney_syndromes[i] =
+          forney_syndromes[i + 1U] ^ RS_GfMul(x, forney_syndromes[i]);
     }
-
-    memcpy(saved, locator, sizeof(locator));
-    {
-      uint8_t scale = RS_GfDiv(discrepancy, previous_discrepancy);
-      for (uint8_t i = 0U; (uint16_t)i + shift <= RS_PARITY_SYMBOLS; i++)
-      {
-        locator[i + shift] ^= RS_GfMul(scale, previous[i]);
-      }
-    }
-
-    if ((uint8_t)(2U * locator_degree) <= step)
-    {
-      locator_degree = (uint8_t)(step + 1U - locator_degree);
-      memcpy(previous, saved, sizeof(previous));
-      previous_discrepancy = discrepancy;
-      shift = 1U;
-    }
-    else
-    {
-      shift++;
-    }
+    forney_count--;
   }
 
-  if ((locator_degree == 0U) || (locator_degree > RS_CORRECTABLE_SYMBOLS))
+  if (forney_count > 0U)
+  {
+    if (RS_FindErrorLocator(forney_syndromes, forney_count,
+                            error_locator, &unknown_error_degree) == 0U)
+    {
+      return -1;
+    }
+  }
+  else
+  {
+    error_locator[0] = 1U;
+  }
+
+  if (((uint16_t)(2U * unknown_error_degree) + erasure_count) > RS_PARITY_SYMBOLS)
+  {
+    return -1;
+  }
+
+  for (uint8_t i = 0U; i <= unknown_error_degree; i++)
+  {
+    for (uint8_t j = 0U; j <= erasure_degree; j++)
+    {
+      locator[i + j] ^= RS_GfMul(error_locator[i], erasure_locator[j]);
+    }
+  }
+  locator_degree = (uint8_t)(unknown_error_degree + erasure_degree);
+  if ((locator_degree == 0U) || (locator_degree > RS_PARITY_SYMBOLS))
   {
     return -1;
   }
@@ -2732,7 +3774,7 @@ static int8_t RS_Decode(uint8_t *codeword, uint8_t *corrected_count)
 
     if (RS_PolyEvalAscending(locator, locator_degree, x) == 0U)
     {
-      if (error_count >= RS_CORRECTABLE_SYMBOLS)
+      if (error_count >= RS_PARITY_SYMBOLS)
       {
         return -1;
       }
@@ -2741,12 +3783,13 @@ static int8_t RS_Decode(uint8_t *codeword, uint8_t *corrected_count)
       error_count++;
     }
   }
-
   if (error_count != locator_degree)
   {
     return -1;
   }
 
+  /* Solve all known-erasure and unknown-error magnitudes together from the
+     first locator_degree syndromes using a GF(64) Vandermonde system. */
   memset(matrix, 0, sizeof(matrix));
   for (uint8_t row = 0U; row < error_count; row++)
   {
@@ -2828,14 +3871,203 @@ static int8_t RS_Decode(uint8_t *codeword, uint8_t *corrected_count)
   return (int8_t)error_count;
 }
 
+/* Generalized minimum-distance retry: preserve any true slot erasures, then
+   only after ordinary errors+erasures decoding fails, progressively mark the
+   least-reliable remaining symbols as erasures.  Every attempt starts from
+   the unmodified received codeword and RS_Decode performs a full syndrome
+   verification before a candidate is accepted. */
+static int8_t RS_DecodeAdaptive(uint8_t *codeword,
+                                const uint8_t *erased_flags,
+                                const float *reliability,
+                                uint8_t *corrected_count,
+                                uint8_t *used_erasure_count,
+                                uint8_t *adaptive_erasure_count)
+{
+  uint8_t original[RS_CODEWORD_SYMBOLS];
+  uint8_t working[RS_CODEWORD_SYMBOLS];
+  uint8_t erasure_positions[RS_PARITY_SYMBOLS];
+  uint8_t candidates[RS_CODEWORD_SYMBOLS];
+  uint8_t explicit_count = 0U;
+  uint8_t candidate_count = 0U;
+  uint8_t max_adaptive;
+
+  if ((codeword == NULL) || (erased_flags == NULL) || (reliability == NULL) ||
+      (corrected_count == NULL) || (used_erasure_count == NULL) ||
+      (adaptive_erasure_count == NULL))
+  {
+    return -1;
+  }
+
+  *corrected_count = 0U;
+  *used_erasure_count = 0U;
+  *adaptive_erasure_count = 0U;
+  memcpy(original, codeword, sizeof(original));
+
+  for (uint8_t pos = 0U; pos < RS_CODEWORD_SYMBOLS; pos++)
+  {
+    if (erased_flags[pos] != 0U)
+    {
+      explicit_count++;
+    }
+    else
+    {
+      candidates[candidate_count++] = pos;
+    }
+  }
+  *used_erasure_count = explicit_count;
+  if (explicit_count > RS_PARITY_SYMBOLS)
+  {
+    return -1;
+  }
+
+  {
+    uint8_t index = 0U;
+    for (uint8_t pos = 0U; pos < RS_CODEWORD_SYMBOLS; pos++)
+    {
+      if (erased_flags[pos] != 0U)
+      {
+        erasure_positions[index++] = pos;
+      }
+    }
+  }
+
+  /* Stable insertion sort keeps equal-confidence symbols in wire order. */
+  for (uint8_t i = 1U; i < candidate_count; i++)
+  {
+    uint8_t candidate = candidates[i];
+    uint8_t j = i;
+
+    while ((j > 0U) &&
+           (reliability[candidate] < reliability[candidates[j - 1U]]))
+    {
+      candidates[j] = candidates[j - 1U];
+      j--;
+    }
+    candidates[j] = candidate;
+  }
+
+  max_adaptive = (uint8_t)(RS_PARITY_SYMBOLS - explicit_count);
+  if (max_adaptive > candidate_count)
+  {
+    max_adaptive = candidate_count;
+  }
+
+  for (uint8_t add_count = 0U; add_count <= max_adaptive; add_count++)
+  {
+    uint8_t attempt_corrected = 0U;
+    uint8_t total_erasures = (uint8_t)(explicit_count + add_count);
+    int8_t status;
+
+    memcpy(working, original, sizeof(working));
+    for (uint8_t i = 0U; i < add_count; i++)
+    {
+      erasure_positions[explicit_count + i] = candidates[i];
+    }
+    status = RS_Decode(working, erasure_positions, total_erasures,
+                       &attempt_corrected);
+    if (status >= 0)
+    {
+      memcpy(codeword, working, sizeof(working));
+      *corrected_count = attempt_corrected;
+      *used_erasure_count = total_erasures;
+      *adaptive_erasure_count = add_count;
+      return status;
+    }
+  }
+
+  /* On failure report the explicit count and how far the GMD search ran. */
+  *adaptive_erasure_count = max_adaptive;
+  return -1;
+}
+
+/* Decode one exact GMD hypothesis.  This is used by CRC-guided fallback to
+   continue past a syndrome-valid but CRC-invalid candidate. */
+static int8_t RS_DecodeAdaptiveAttempt(const uint8_t *received,
+                                       const uint8_t *erased_flags,
+                                       const float *reliability,
+                                       uint8_t adaptive_erasure_count,
+                                       uint8_t *decoded,
+                                       uint8_t *corrected_count,
+                                       uint8_t *used_erasure_count)
+{
+  uint8_t erasure_positions[RS_PARITY_SYMBOLS];
+  uint8_t candidates[RS_CODEWORD_SYMBOLS];
+  uint8_t explicit_count = 0U;
+  uint8_t candidate_count = 0U;
+
+  if ((received == NULL) || (erased_flags == NULL) || (reliability == NULL) ||
+      (decoded == NULL) || (corrected_count == NULL) ||
+      (used_erasure_count == NULL))
+  {
+    return -1;
+  }
+
+  for (uint8_t pos = 0U; pos < RS_CODEWORD_SYMBOLS; pos++)
+  {
+    if (erased_flags[pos] != 0U)
+    {
+      if (explicit_count < RS_PARITY_SYMBOLS)
+      {
+        erasure_positions[explicit_count] = pos;
+      }
+      explicit_count++;
+    }
+    else
+    {
+      candidates[candidate_count++] = pos;
+    }
+  }
+  *corrected_count = 0U;
+  *used_erasure_count = explicit_count;
+  if ((explicit_count > RS_PARITY_SYMBOLS) ||
+      (adaptive_erasure_count > candidate_count) ||
+      (((uint16_t)explicit_count + adaptive_erasure_count) > RS_PARITY_SYMBOLS))
+  {
+    return -1;
+  }
+
+  for (uint8_t i = 1U; i < candidate_count; i++)
+  {
+    uint8_t candidate = candidates[i];
+    uint8_t j = i;
+
+    while ((j > 0U) &&
+           (reliability[candidate] < reliability[candidates[j - 1U]]))
+    {
+      candidates[j] = candidates[j - 1U];
+      j--;
+    }
+    candidates[j] = candidate;
+  }
+  for (uint8_t i = 0U; i < adaptive_erasure_count; i++)
+  {
+    erasure_positions[explicit_count + i] = candidates[i];
+  }
+
+  *used_erasure_count = (uint8_t)(explicit_count + adaptive_erasure_count);
+  memcpy(decoded, received, RS_CODEWORD_SYMBOLS);
+  return RS_Decode(decoded, erasure_positions, *used_erasure_count,
+                   corrected_count);
+}
+
 static uint8_t RS_SelfTest(void)
 {
   static const uint8_t error_positions[RS_CORRECTABLE_SYMBOLS] = {0U, 7U, 15U, 25U, 33U};
   static const uint8_t error_values[RS_CORRECTABLE_SYMBOLS] = {1U, 3U, 7U, 15U, 31U};
+  static const uint8_t erasure_positions[RS_PARITY_SYMBOLS] = {
+    0U, 3U, 6U, 9U, 12U, 15U, 18U, 21U, 24U, 33U
+  };
+  static const uint8_t mixed_erasure_positions[4U] = {1U, 8U, 17U, 29U};
+  static const uint8_t mixed_error_positions[3U] = {4U, 14U, 32U};
+  static const uint8_t gmd_error_positions[6U] = {2U, 5U, 11U, 19U, 27U, 31U};
   uint8_t data[RS_DATA_SYMBOLS];
   uint8_t expected[RS_CODEWORD_SYMBOLS];
   uint8_t damaged[RS_CODEWORD_SYMBOLS];
+  uint8_t gmd_erased_flags[RS_CODEWORD_SYMBOLS] = {0};
+  float gmd_reliability[RS_CODEWORD_SYMBOLS];
   uint8_t corrected = 0U;
+  uint8_t used_erasures = 0U;
+  uint8_t adaptive_erasures = 0U;
 
   for (uint8_t i = 0U; i < RS_DATA_SYMBOLS; i++)
   {
@@ -2849,7 +4081,7 @@ static uint8_t RS_SelfTest(void)
     damaged[error_positions[i]] ^= error_values[i];
   }
 
-  if (RS_Decode(damaged, &corrected) != (int8_t)RS_CORRECTABLE_SYMBOLS)
+  if (RS_Decode(damaged, NULL, 0U, &corrected) != (int8_t)RS_CORRECTABLE_SYMBOLS)
   {
     return 0U;
   }
@@ -2857,7 +4089,71 @@ static uint8_t RS_SelfTest(void)
   {
     return 0U;
   }
-  return (memcmp(damaged, expected, sizeof(expected)) == 0) ? 1U : 0U;
+  if (memcmp(damaged, expected, sizeof(expected)) != 0)
+  {
+    return 0U;
+  }
+
+  memcpy(damaged, expected, sizeof(damaged));
+  for (uint8_t i = 0U; i < RS_PARITY_SYMBOLS; i++)
+  {
+    damaged[erasure_positions[i]] ^= (uint8_t)(i + 1U);
+  }
+  corrected = 0U;
+  if ((RS_Decode(damaged, erasure_positions, RS_PARITY_SYMBOLS, &corrected) !=
+       (int8_t)RS_PARITY_SYMBOLS) ||
+      (corrected != RS_PARITY_SYMBOLS) ||
+      (memcmp(damaged, expected, sizeof(expected)) != 0))
+  {
+    return 0U;
+  }
+
+  memcpy(damaged, expected, sizeof(damaged));
+  for (uint8_t i = 0U; i < sizeof(mixed_erasure_positions); i++)
+  {
+    damaged[mixed_erasure_positions[i]] ^= (uint8_t)(3U + (i * 5U));
+  }
+  for (uint8_t i = 0U; i < sizeof(mixed_error_positions); i++)
+  {
+    damaged[mixed_error_positions[i]] ^= (uint8_t)(7U + (i * 9U));
+  }
+  corrected = 0U;
+  if ((RS_Decode(damaged, mixed_erasure_positions,
+                  (uint8_t)sizeof(mixed_erasure_positions), &corrected) != 7) ||
+      (corrected != 7U) ||
+      (memcmp(damaged, expected, sizeof(expected)) != 0))
+  {
+    return 0U;
+  }
+
+  /* Six unknown errors exceed t=5.  Marking the two least-reliable damaged
+     positions as erasures converts the case to 4 errors + 2 erasures, exactly
+     satisfying 2e+s=10. */
+  memcpy(damaged, expected, sizeof(damaged));
+  for (uint8_t i = 0U; i < RS_CODEWORD_SYMBOLS; i++)
+  {
+    gmd_reliability[i] = RS_VOTE_RATIO_CAP;
+  }
+  for (uint8_t i = 0U; i < sizeof(gmd_error_positions); i++)
+  {
+    damaged[gmd_error_positions[i]] ^= (uint8_t)(1U << i);
+  }
+  gmd_reliability[gmd_error_positions[0]] = 1.01f;
+  gmd_reliability[gmd_error_positions[1]] = 1.02f;
+  corrected = 0U;
+  used_erasures = 0U;
+  adaptive_erasures = 0U;
+  if ((RS_DecodeAdaptive(damaged, gmd_erased_flags, gmd_reliability,
+                         &corrected, &used_erasures,
+                         &adaptive_erasures) != 6) ||
+      (corrected != 6U) || (used_erasures != 2U) ||
+      (adaptive_erasures != 2U) ||
+      (memcmp(damaged, expected, sizeof(expected)) != 0))
+  {
+    return 0U;
+  }
+
+  return 1U;
 }
 
 static void RX_ResetDetector(void)
@@ -2884,7 +4180,8 @@ static uint8_t RX_StartSampling(void)
   }
 
   RX_ResetDetector();
-  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_dma_buf, ADC_DMA_BUFFER_SAMPLES) != HAL_OK)
+  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_dma_buf,
+                        (uint32_t)fsk_symbol_samples * 2U) != HAL_OK)
   {
     printf("half duplex: ADC DMA start fail\r\n");
     return 0U;
@@ -2935,7 +4232,8 @@ static void HalfDuplex_Task(void)
   if (RX_StartSampling() != 0U)
   {
     rx_resume_pending = 0U;
-    printf("half duplex: RX listening\r\n");
+    printf("half duplex: RX listening, PGA=x%u\r\n",
+           rx_pga_gain_values[rx_pga_gain_code]);
     OLED_PrintRxStatus();
   }
   else
@@ -2944,8 +4242,85 @@ static void HalfDuplex_Task(void)
   }
 }
 
+static void CommunicationMode_Select(CommunicationMode mode)
+{
+  if ((communication_mode != COMM_MODE_UNSELECTED) ||
+      ((mode != COMM_MODE_STANDARD) &&
+       (mode != COMM_MODE_MULTI_NODE) &&
+       (mode != COMM_MODE_HIDDEN)))
+  {
+    return;
+  }
+
+  communication_mode = mode;
+  app_mode = APP_MODE_RX;
+  tx_destination_id = 0U;
+  rx_resume_pending = 0U;
+
+#if FSK_HIGH_PROFILE_ENABLE != 0U
+  FSK_ApplyProfile((communication_mode == COMM_MODE_HIDDEN) ? 1U : 0U);
+#endif
+
+  if (communication_mode != COMM_MODE_MULTI_NODE)
+  {
+    /* Standard and hidden modes use the addressed frame format as N1 broadcast. */
+    local_node_id = 1U;
+    tx_calibration_sent = 0U;
+  }
+  else
+  {
+    local_node_id = 0U;
+    /* Multi-node mode intentionally has no calibration transmission stage. */
+    tx_calibration_sent = 1U;
+  }
+
+  Calibration_ResetProgress();
+  RX_ResetDetector();
+
+  if (RX_StartSampling() == 0U)
+  {
+    Error_Handler();
+  }
+
+  if (communication_mode == COMM_MODE_STANDARD)
+  {
+    printf("communication mode: STANDARD, calibration enabled, PGA automatic from x%u; reset to change mode\r\n",
+           rx_pga_gain_values[rx_pga_gain_code]);
+    printf("standard route: internal N1->ALL; receive the other board's calibration before messages\r\n");
+    printf("standard RX keys after calibration: short A/B=older/newer message, hold A/B %ums=PGA down/up\r\n",
+           KEYPAD_LONG_PRESS_MS);
+  }
+  else if (communication_mode == COMM_MODE_HIDDEN)
+  {
+    printf("communication mode: HIDDEN, high-frequency profile with calibration, PGA automatic from x%u; reset to change mode\r\n",
+           rx_pga_gain_values[rx_pga_gain_code]);
+    printf("hidden profile: data=%u/%u/%u/%uHz sync=%uHz; internal N1->ALL\r\n",
+           fsk_tx_freqs_hz[0], fsk_tx_freqs_hz[1],
+           fsk_tx_freqs_hz[2], fsk_tx_freqs_hz[3],
+           fsk_tx_freqs_hz[FSK_SYNC_SYMBOL]);
+    printf("hidden RX keys after calibration: short A/B=older/newer message, hold A/B %ums=PGA down/up\r\n",
+           KEYPAD_LONG_PRESS_MS);
+  }
+  else
+  {
+    printf("communication mode: MULTI-NODE, calibration skipped, PGA locked x%u; reset to change mode\r\n",
+           rx_pga_gain_values[rx_pga_gain_code]);
+    printf("multi-node setup: press 1/2/3 for local ID, D cycles ALL/N1/N2/N3 destination\r\n");
+  }
+  printf("half duplex: RX listening, PGA=x%u\r\n",
+         rx_pga_gain_values[rx_pga_gain_code]);
+  OLED_PrintMode();
+}
+
 static void App_ToggleMode(void)
 {
+  if (communication_mode == COMM_MODE_UNSELECTED)
+  {
+    printf("select communication mode first: A=STANDARD B=MULTI-NODE C=HIDDEN\r\n");
+    OLED_PrintMode();
+    return;
+  }
+
   if (tx_mode != TX_MODE_IDLE)
   {
     printf("mode switch ignored: TX busy\r\n");
@@ -2954,6 +4329,12 @@ static void App_ToggleMode(void)
 
   if (app_mode == APP_MODE_RX)
   {
+    if (local_node_id == 0U)
+    {
+      printf("mode switch blocked: press RX key 1/2/3 to set local node ID first\r\n");
+      OLED_PrintRxStatus();
+      return;
+    }
     rx_complete_led_active = 0U;
     HAL_GPIO_WritePin(BOARD_LED_GPIO_Port, BOARD_LED_Pin, BOARD_LED_OFF);
     rx_resume_pending = 0U;
@@ -2975,7 +4356,8 @@ static void App_ToggleMode(void)
     rx_resume_pending = 0U;
     if (RX_StartSampling() != 0U)
     {
-      printf("mode: RX listening\r\n");
+      printf("mode: RX listening, PGA=x%u\r\n",
+             rx_pga_gain_values[rx_pga_gain_code]);
     }
     else
     {
@@ -2990,6 +4372,14 @@ static void App_ToggleMode(void)
 
 static void TX_StartCalibration(void)
 {
+  if ((communication_mode != COMM_MODE_STANDARD) &&
+      (communication_mode != COMM_MODE_HIDDEN))
+  {
+    printf("multi-node mode: calibration is disabled and PGA is locked x%u\r\n",
+           rx_pga_gain_values[RX_PGA_MULTI_GAIN_CODE]);
+    return;
+  }
+
   if ((app_mode != APP_MODE_TX) ||
       (tx_mode != TX_MODE_IDLE) ||
       (tx_calibration_sent != 0U))
@@ -3004,16 +4394,23 @@ static void TX_StartCalibration(void)
   __disable_irq();
   tx_done_pending = 0U;
   tx_done_is_calibration = 0U;
+  tx_calibration_pass = 0U;
+  tx_calibration_boundary_active = 0U;
   tx_calibration_stage = 0U;
+  tx_calibration_stage_sample_count = 0U;
+  tx_frame_part = TX_FRAME_TONE;
   tx_part_sample_count = 0U;
   TX_LoadCalibrationTone(0U);
   tx_mode = TX_MODE_CALIBRATION;
   __enable_irq();
 
   HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_ENABLE);
+  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, TX_LED_ON);
   printf("half duplex: RX/ADC disabled, TX calibration active\r\n");
-  printf("tx calibration only: continuous 00/01/10/11, %ums each\r\n",
-         CALIBRATION_TONE_MS);
+  printf("tx calibration only: 2 passes of 00/01/10/11, pass1=RX PGA AGC up/down, %ums %uHz boundary + %ums gap, pass2=AGC down-only verify\r\n",
+         CALIBRATION_BOUNDARY_MS, fsk_tx_freqs_hz[FSK_SYNC_SYMBOL], CALIBRATION_INTERPASS_GAP_MS);
+  printf("tx calibration tone timing: %u+%ums bursts for %ums each tone; no manual replay\r\n",
+         TX_TONE_MS, TX_GAP_MS, CALIBRATION_STAGE_MS);
   OLED_PrintTxStatus();
 }
 
@@ -3030,6 +4427,12 @@ static void TX_StartMessage(void)
     OLED_PrintTxStatus();
     return;
   }
+  if ((local_node_id < 1U) || (local_node_id > 3U))
+  {
+    printf("tx message blocked: return to RX and press 1/2/3 to set local node ID\r\n");
+    OLED_PrintTxStatus();
+    return;
+  }
 
   TX_BuildMessageFrame();
 
@@ -3043,9 +4446,11 @@ static void TX_StartMessage(void)
   tx_done_pending = 0U;
 
   printf("half duplex: RX paused, TX active\r\n");
-  printf("tx start: len=%u FSK_symbols=%u RS=%ux(%u,%u) total_parity=%u text=\"%s\"\r\n",
-         tx_last_len, tx_frame_len, RS_BLOCK_COUNT, RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS,
-         RS_TOTAL_PARITY_SYMBOLS, tx_last_message);
+  printf("tx start: N%u->%s len=%u FSK_symbols=%u RS=%ux(%u,%u) total_parity=%u text=\"%s\"\r\n",
+         local_node_id, Node_DestinationLabel(tx_destination_id),
+         tx_last_len, tx_frame_len, RS_BLOCK_COUNT,
+         RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS, RS_TOTAL_PARITY_SYMBOLS,
+         tx_last_message);
   OLED_PrintRxStatus();
   OLED_PrintTxStatus();
 
@@ -3059,6 +4464,7 @@ static void TX_StartMessage(void)
   __enable_irq();
 
   HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_ENABLE);
+  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, TX_LED_ON);
 }
 
 static void TX_Stop(void)
@@ -3069,7 +4475,10 @@ static void TX_Stop(void)
   tx_mode = TX_MODE_IDLE;
   tx_phase = 0U;
   tx_part_sample_count = 0U;
+  tx_calibration_pass = 0U;
+  tx_calibration_boundary_active = 0U;
   tx_calibration_stage = 0U;
+  tx_calibration_stage_sample_count = 0U;
   tx_done_pending = 0U;
   tx_done_is_calibration = 0U;
   DAC_Write12(TX_DAC_MID_CODE);
@@ -3077,6 +4486,7 @@ static void TX_Stop(void)
 
   tx_display_sending = 0U;
   HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
+  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, TX_LED_OFF);
 }
 
 static void TX_UI_Task(void)
@@ -3099,7 +4509,7 @@ static void TX_UI_Task(void)
     tx_display_sending = 0U;
     if (done_is_calibration != 0U)
     {
-      printf("tx calibration done: local RX stayed disabled; press * for RX\r\n");
+      printf("tx calibration done: 2 passes sent once, local RX stayed disabled; press * for RX\r\n");
     }
     else
     {
@@ -3129,36 +4539,99 @@ static void TX_AudioTick(void)
 
   if (tx_mode == TX_MODE_CALIBRATION)
   {
-    if (tx_calibration_stage < FSK_DATA_FREQ_COUNT)
+    if (tx_calibration_boundary_active != 0U)
     {
       DAC_WriteSample8(TX_ScaledSineSample());
-      tx_part_sample_count++;
+      tx_calibration_stage_sample_count++;
+      if (tx_calibration_stage_sample_count >= CALIBRATION_BOUNDARY_SAMPLES)
+      {
+        tx_calibration_boundary_active = 0U;
+        tx_calibration_stage_sample_count = 0U;
+        tx_part_sample_count = 0U;
+        tx_frame_part = TX_FRAME_GAP;
+        DAC_Write12(TX_DAC_MID_CODE);
+        HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
+      }
+      return;
+    }
 
-      if (tx_part_sample_count >= CALIBRATION_TONE_SAMPLES)
+    if (tx_calibration_stage < FSK_DATA_FREQ_COUNT)
+    {
+      if (tx_frame_part == TX_FRAME_TONE)
+      {
+        DAC_WriteSample8(TX_ScaledSineSample());
+      }
+      tx_part_sample_count++;
+      tx_calibration_stage_sample_count++;
+
+      if (tx_calibration_stage_sample_count >= CALIBRATION_STAGE_SAMPLES)
       {
         tx_part_sample_count = 0U;
+        tx_calibration_stage_sample_count = 0U;
         tx_calibration_stage++;
         if (tx_calibration_stage < FSK_DATA_FREQ_COUNT)
         {
+          tx_frame_part = TX_FRAME_TONE;
           TX_LoadCalibrationTone(tx_calibration_stage);
         }
         else
         {
-          DAC_Write12(TX_DAC_MID_CODE);
+          if ((tx_calibration_pass + 1U) < CALIBRATION_PASS_COUNT)
+          {
+            tx_calibration_boundary_active = 1U;
+            tx_frame_part = TX_FRAME_TONE;
+            TX_LoadCalibrationBoundaryTone();
+          }
+          else
+          {
+            tx_frame_part = TX_FRAME_GAP;
+            DAC_Write12(TX_DAC_MID_CODE);
+            HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
+          }
         }
+      }
+      else if ((tx_frame_part == TX_FRAME_TONE) &&
+               (tx_part_sample_count >= TX_TONE_SAMPLES))
+      {
+        tx_frame_part = TX_FRAME_GAP;
+        tx_part_sample_count = 0U;
+        DAC_Write12(TX_DAC_MID_CODE);
+      }
+      else if ((tx_frame_part == TX_FRAME_GAP) &&
+               (tx_part_sample_count >= TX_GAP_SAMPLES))
+      {
+        tx_frame_part = TX_FRAME_TONE;
+        tx_part_sample_count = 0U;
+        TX_LoadCalibrationTone(tx_calibration_stage);
       }
     }
     else
     {
       tx_part_sample_count++;
-      if (tx_part_sample_count >= CALIBRATION_TX_GUARD_SAMPLES)
+      if ((tx_calibration_pass + 1U) < CALIBRATION_PASS_COUNT)
+      {
+        if (tx_part_sample_count >= CALIBRATION_INTERPASS_GAP_SAMPLES)
+        {
+          tx_part_sample_count = 0U;
+          tx_calibration_stage_sample_count = 0U;
+          tx_calibration_pass++;
+          tx_calibration_boundary_active = 0U;
+          tx_calibration_stage = 0U;
+          tx_frame_part = TX_FRAME_TONE;
+          TX_LoadCalibrationTone(0U);
+          HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_ENABLE);
+        }
+      }
+      else if (tx_part_sample_count >= CALIBRATION_TX_GUARD_SAMPLES)
       {
         tx_part_sample_count = 0U;
+        tx_calibration_stage_sample_count = 0U;
         tx_calibration_sent = 1U;
         tx_mode = TX_MODE_IDLE;
         tx_done_is_calibration = 1U;
         tx_done_pending = 1U;
         HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
+        HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, TX_LED_OFF);
       }
     }
     return;
@@ -3191,6 +4664,7 @@ static void TX_AudioTick(void)
         tx_done_is_calibration = 0U;
         tx_done_pending = 1U;
         HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
+        HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, TX_LED_OFF);
       }
       else
       {
@@ -3229,29 +4703,38 @@ static void TX_LoadCalibrationTone(uint8_t stage)
   tx_phase_inc = TX_PhaseIncFromFreq(fsk_tx_freqs_hz[stage]);
 }
 
+static void TX_LoadCalibrationBoundaryTone(void)
+{
+  tx_current_bits = FSK_SYNC_SYMBOL;
+  tx_current_amp = tx_fsk_amp[FSK_SYNC_SYMBOL];
+  tx_phase = 0U;
+  tx_phase_inc = TX_PhaseIncFromFreq(fsk_tx_freqs_hz[FSK_SYNC_SYMBOL]);
+}
+
 static void TX_BuildMessageFrame(void)
 {
   uint16_t pos = 0U;
+  uint8_t rs_payload[RS_TOTAL_DATA_SYMBOLS];
   uint8_t rs_codewords[RS_BLOCK_COUNT][RS_CODEWORD_SYMBOLS];
+  uint16_t crc;
+
+  memset(rs_payload, RS_PAD_VALUE, sizeof(rs_payload));
+  for (uint8_t i = 0U; i < tx_text_len; i++)
+  {
+    rs_payload[i] = Message_CharToCode(tx_text[i]);
+  }
+  crc = Message_Crc12Addressed(local_node_id, tx_destination_id,
+                               rs_payload, MESSAGE_MAX_LEN);
+  rs_payload[MESSAGE_MAX_LEN] = (uint8_t)((crc >> 6U) & RS_FIELD_ORDER);
+  rs_payload[MESSAGE_MAX_LEN + 1U] = (uint8_t)(crc & RS_FIELD_ORDER);
 
   for (uint8_t block = 0U; block < RS_BLOCK_COUNT; block++)
   {
-    uint8_t rs_data[RS_DATA_SYMBOLS];
-    uint8_t text_offset = (uint8_t)(block * RS_DATA_SYMBOLS);
-
-    memset(rs_data, RS_PAD_VALUE, sizeof(rs_data));
-    for (uint8_t i = 0U; i < RS_DATA_SYMBOLS; i++)
-    {
-      uint8_t text_index = (uint8_t)(text_offset + i);
-
-      if (text_index >= tx_text_len)
-      {
-        break;
-      }
-      rs_data[i] = Message_CharToCode(tx_text[text_index]);
-    }
-    RS_Encode(rs_data, rs_codewords[block]);
+    RS_Encode(&rs_payload[block * RS_DATA_SYMBOLS], rs_codewords[block]);
   }
+  printf("tx payload: N%u->%s text=%u/%u CRC12=0x%03X\r\n",
+         local_node_id, Node_DestinationLabel(tx_destination_id),
+         tx_text_len, MESSAGE_MAX_LEN, crc);
 
   for (uint8_t repeat = 0U; repeat < TX_REPEAT_COUNT; repeat++)
   {
@@ -3261,10 +4744,8 @@ static void TX_BuildMessageFrame(void)
     {
       tx_frame_symbols[pos++] = tx_preamble_symbols[i];
     }
-    for (uint8_t i = 0U; i < MSG_START_LEN; i++)
-    {
-      tx_frame_symbols[pos++] = tx_start_symbols[i];
-    }
+    tx_frame_symbols[pos++] = Node_SourceBitsFromId(local_node_id);
+    tx_frame_symbols[pos++] = tx_destination_id;
 
     for (uint8_t i = 0U; i < RS_CODEWORD_SYMBOLS; i++)
     {
@@ -3359,6 +4840,334 @@ static void PGA_SetGain(uint8_t gain_code)
 {
   SPI1_Write16(PGA_CS_GPIO_Port, PGA_CS_Pin,
                (uint16_t)(0x4000U | (gain_code & 0x07U)));
+}
+
+static uint8_t PGA_IsCalibrationToneQualified(const FSK_DetectResult *result)
+{
+  if ((result->valid == 0U) ||
+      (result->bits >= FSK_DATA_FREQ_COUNT) ||
+      (result->max_energy <= (result->second_energy * RX_PGA_AGC_TONE_RATIO)))
+  {
+    return 0U;
+  }
+
+  if ((calibration_pass != 0U) && (result->bits != calibration_stage))
+  {
+    return 0U;
+  }
+
+  return 1U;
+}
+
+static uint8_t PGA_AutoGainControl(const FSK_DetectResult *result, uint32_t now)
+{
+  uint16_t low_peak;
+  uint16_t high_peak;
+  uint16_t peak;
+  uint8_t clipped;
+  int8_t direction = 0;
+  const char *reason = "OK";
+  uint8_t old_code;
+  uint8_t old_gain;
+  uint8_t new_gain;
+  uint8_t calibration_tone_valid;
+
+  if ((communication_mode != COMM_MODE_STANDARD) &&
+      (communication_mode != COMM_MODE_HIDDEN))
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_clip_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    return 0U;
+  }
+
+  if ((calibration_complete != 0U) || (calibration_failed != 0U))
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_clip_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    return 0U;
+  }
+  if ((now - rx_pga_agc_last_adjust_tick) < RX_PGA_AGC_SETTLE_MS)
+  {
+    return 0U;
+  }
+
+  low_peak = (result->adc_mean > result->adc_min) ?
+             (uint16_t)(result->adc_mean - result->adc_min) : 0U;
+  high_peak = (result->adc_max > result->adc_mean) ?
+              (uint16_t)(result->adc_max - result->adc_mean) : 0U;
+  peak = (low_peak > high_peak) ? low_peak : high_peak;
+  clipped = ((result->adc_min <= RX_PGA_ADC_CLIP_MARGIN) ||
+             (result->adc_max >= (4095U - RX_PGA_ADC_CLIP_MARGIN))) ? 1U : 0U;
+  calibration_tone_valid = PGA_IsCalibrationToneQualified(result);
+
+  if (calibration_tone_valid == 0U)
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_clip_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    return 0U;
+  }
+
+  if (clipped != 0U)
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    if (rx_pga_agc_clip_windows < RX_PGA_AGC_CLIP_WINDOWS)
+    {
+      rx_pga_agc_clip_windows++;
+    }
+    if (rx_pga_agc_clip_windows < RX_PGA_AGC_CLIP_WINDOWS)
+    {
+      return 0U;
+    }
+    direction = -1;
+    reason = "CLIP";
+  }
+  else if (peak > RX_PGA_ADC_HIGH_PEAK)
+  {
+    rx_pga_agc_clip_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    if (rx_pga_agc_high_windows < RX_PGA_AGC_HIGH_WINDOWS)
+    {
+      rx_pga_agc_high_windows++;
+    }
+    if (rx_pga_agc_high_windows < RX_PGA_AGC_HIGH_WINDOWS)
+    {
+      return 0U;
+    }
+    direction = -1;
+    reason = "HIGH";
+  }
+  else if ((calibration_pass == 0U) &&
+           (peak < RX_PGA_ADC_LOW_PEAK) &&
+           (result->bits < FSK_DATA_FREQ_COUNT))
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_clip_windows = 0U;
+    if (rx_pga_agc_low_windows < RX_PGA_AGC_LOW_WINDOWS)
+    {
+      rx_pga_agc_low_windows++;
+    }
+    if (rx_pga_agc_low_windows < RX_PGA_AGC_LOW_WINDOWS)
+    {
+      return 0U;
+    }
+    direction = 1;
+    reason = "LOW";
+  }
+  else
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_clip_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    return 0U;
+  }
+
+  if ((direction < 0) && (rx_pga_gain_code == 0U))
+  {
+    rx_pga_agc_high_windows = 0U;
+    rx_pga_agc_clip_windows = 0U;
+    rx_pga_agc_low_windows = 0U;
+    if (clipped != 0U)
+    {
+      calibration_capture_active = 0U;
+      calibration_complete = 0U;
+      calibration_failed = 1U;
+      printf("calibration failed: ADC CLIP remains at PGA x1 pass=%u/2 mean=%u min=%u max=%u; reduce analog gain or increase distance\r\n",
+             calibration_pass + 1U, (unsigned int)result->adc_mean,
+             result->adc_min, result->adc_max);
+      OLED_PrintRxStatus();
+      return 1U;
+    }
+    return 0U;
+  }
+  if ((direction > 0) && (rx_pga_gain_code >= 7U))
+  {
+    rx_pga_agc_low_windows = 0U;
+    return 0U;
+  }
+
+  old_code = rx_pga_gain_code;
+  old_gain = rx_pga_gain_values[old_code];
+  rx_pga_gain_code = (direction < 0) ?
+                     (uint8_t)(rx_pga_gain_code - 1U) :
+                     (uint8_t)(rx_pga_gain_code + 1U);
+  new_gain = rx_pga_gain_values[rx_pga_gain_code];
+
+  if (calibration_pass != 0U)
+  {
+    float energy_scale = (float)new_gain / (float)old_gain;
+    energy_scale *= energy_scale;
+    for (uint8_t i = 0U; i < calibration_stage; i++)
+    {
+      calibration_energy[i] *= energy_scale;
+    }
+  }
+
+  PGA_SetGain(rx_pga_gain_code);
+  rx_pga_agc_last_adjust_tick = now;
+  rx_pga_agc_high_windows = 0U;
+  rx_pga_agc_clip_windows = 0U;
+  rx_pga_agc_low_windows = 0U;
+  calibration_capture_active = 0U;
+  calibration_energy_sum = 0.0f;
+  calibration_energy_windows = 0U;
+  calibration_boundary_windows = 0U;
+  calibration_stable_windows = 0U;
+  calibration_lost_windows = 0U;
+  calibration_progress_tick = now;
+  if (calibration_pass == 0U)
+  {
+    calibration_coarse_activity = 0U;
+    calibration_coarse_last_signal_tick = 0U;
+  }
+  calibration_adc_min_seen = 0xFFFFU;
+  calibration_adc_max_seen = 0U;
+  calibration_adc_mean_last = 2048U;
+  for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+  {
+    fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
+  }
+  RX_ResetDetector();
+  printf("PGA AGC adjust: pass=%u/2 reason=%s x%u -> x%u ADC mean=%u min=%u max=%u peak=%u%s\r\n",
+         calibration_pass + 1U, reason,
+         rx_pga_gain_values[old_code], rx_pga_gain_values[rx_pga_gain_code],
+         (unsigned int)result->adc_mean, result->adc_min, result->adc_max, peak,
+         (calibration_pass != 0U) ? "; current tone restarted" : "");
+  OLED_PrintRxStatus();
+  return 1U;
+}
+
+static uint8_t PGA_ManualAdjust(int8_t direction)
+{
+  uint8_t old_code;
+  uint8_t old_gain;
+  uint8_t new_gain;
+  uint8_t calibrating;
+  uint32_t now = HAL_GetTick();
+
+  if (((communication_mode != COMM_MODE_STANDARD) &&
+       (communication_mode != COMM_MODE_HIDDEN)) ||
+      (app_mode != APP_MODE_RX) ||
+      (calibration_failed != 0U) ||
+      (direction == 0))
+  {
+    return 0U;
+  }
+
+  calibrating = (calibration_complete == 0U) ? 1U : 0U;
+  if ((calibrating == 0U) && (msg_rx_state != MSG_RX_SEARCH))
+  {
+    printf("PGA manual adjust ignored while an RX frame is active\r\n");
+    return 1U;
+  }
+
+  if (((direction < 0) && (rx_pga_gain_code == 0U)) ||
+      ((direction > 0) && (rx_pga_gain_code >= 7U)))
+  {
+    printf("PGA manual limit: already x%u\r\n",
+           rx_pga_gain_values[rx_pga_gain_code]);
+    OLED_PrintRxStatus();
+    return 1U;
+  }
+
+  old_code = rx_pga_gain_code;
+  old_gain = rx_pga_gain_values[old_code];
+  rx_pga_gain_code = (direction < 0) ?
+                     (uint8_t)(rx_pga_gain_code - 1U) :
+                     (uint8_t)(rx_pga_gain_code + 1U);
+  new_gain = rx_pga_gain_values[rx_pga_gain_code];
+
+  /* Keep already captured pass-2 tones in the same gain domain. */
+  if ((calibrating != 0U) && (calibration_pass != 0U))
+  {
+    float energy_scale = (float)new_gain / (float)old_gain;
+    energy_scale *= energy_scale;
+    for (uint8_t i = 0U; i < calibration_stage; i++)
+    {
+      calibration_energy[i] *= energy_scale;
+    }
+  }
+
+  PGA_SetGain(rx_pga_gain_code);
+  rx_pga_agc_last_adjust_tick = now;
+  rx_pga_agc_high_windows = 0U;
+  rx_pga_agc_clip_windows = 0U;
+  rx_pga_agc_low_windows = 0U;
+
+  if (calibrating == 0U)
+  {
+    for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+    {
+      fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
+    }
+    RX_ResetDetector();
+    printf("PGA RX manual adjust: %s x%u -> x%u; calibration energy scales retained\r\n",
+           (direction < 0) ? "A DOWN" : "B UP", old_gain, new_gain);
+    OLED_PrintRxStatus();
+    return 1U;
+  }
+
+  calibration_capture_active = 0U;
+  calibration_energy_sum = 0.0f;
+  calibration_energy_windows = 0U;
+  calibration_boundary_windows = 0U;
+  calibration_stable_windows = 0U;
+  calibration_lost_windows = 0U;
+  calibration_progress_tick = now;
+  if (calibration_pass == 0U)
+  {
+    calibration_coarse_activity = 0U;
+    calibration_coarse_last_signal_tick = 0U;
+  }
+  calibration_adc_min_seen = 0xFFFFU;
+  calibration_adc_max_seen = 0U;
+  calibration_adc_mean_last = 2048U;
+  for (uint8_t i = 0U; i < FSK_FREQ_COUNT; i++)
+  {
+    fsk_noise_floor[i] = FSK_NOISE_MIN_FLOOR;
+  }
+  RX_ResetDetector();
+
+  printf("PGA manual adjust: pass=%u/2 %s x%u -> x%u; current tone restarted, automatic AGC remains enabled\r\n",
+         calibration_pass + 1U, (direction < 0) ? "A DOWN" : "B UP",
+         old_gain, new_gain);
+  OLED_PrintRxStatus();
+  return 1U;
+}
+
+static const char *PGA_AdcQuality(void)
+{
+  uint16_t low_peak;
+  uint16_t high_peak;
+  uint16_t peak;
+
+  if (calibration_adc_min_seen == 0xFFFFU)
+  {
+    return "WAIT";
+  }
+  if ((calibration_adc_min_seen <= RX_PGA_ADC_CLIP_MARGIN) ||
+      (calibration_adc_max_seen >= (4095U - RX_PGA_ADC_CLIP_MARGIN)))
+  {
+    return "CLIP";
+  }
+
+  low_peak = (calibration_adc_mean_last > calibration_adc_min_seen) ?
+             (calibration_adc_mean_last - calibration_adc_min_seen) : 0U;
+  high_peak = (calibration_adc_max_seen > calibration_adc_mean_last) ?
+              (calibration_adc_max_seen - calibration_adc_mean_last) : 0U;
+  peak = (low_peak > high_peak) ? low_peak : high_peak;
+  if (peak < RX_PGA_ADC_LOW_PEAK)
+  {
+    return "LOW";
+  }
+  if (peak > RX_PGA_ADC_HIGH_PEAK)
+  {
+    return "HIGH";
+  }
+  return "OK";
 }
 
 static void Editor_Task(void)
@@ -3591,6 +5400,7 @@ static void Keypad_Task(void)
 {
   uint32_t now = HAL_GetTick();
   uint8_t raw;
+  uint8_t previous_key;
 
   if ((now - keypad_last_scan_ms) < KEYPAD_SCAN_MS)
   {
@@ -3615,11 +5425,45 @@ static void Keypad_Task(void)
 
   if ((keypad_debounce_count >= KEYPAD_DEBOUNCE_SCANS) && (raw != keypad_stable_key))
   {
+    previous_key = keypad_stable_key;
+
+    if ((previous_key != KEY_NONE) &&
+        (keypad_defer_short_press != 0U) &&
+        (keypad_long_press_handled == 0U))
+    {
+      Keypad_HandlePress(previous_key);
+    }
+
     keypad_stable_key = raw;
+    keypad_press_start_ms = now;
+    keypad_defer_short_press = 0U;
+    keypad_long_press_handled = 0U;
+
     if (raw != KEY_NONE)
     {
-      Keypad_HandlePress(raw);
+      if (((communication_mode == COMM_MODE_STANDARD) ||
+           (communication_mode == COMM_MODE_HIDDEN)) &&
+          (app_mode == APP_MODE_RX) &&
+          (calibration_complete != 0U) &&
+          ((raw == 'A') || (raw == 'B')))
+      {
+        /* Defer A/B until release so a long press does not also page memory. */
+        keypad_defer_short_press = 1U;
+      }
+      else
+      {
+        Keypad_HandlePress(raw);
+      }
     }
+  }
+
+  if ((keypad_defer_short_press != 0U) &&
+      (keypad_long_press_handled == 0U) &&
+      (keypad_stable_key != KEY_NONE) &&
+      ((now - keypad_press_start_ms) >= KEYPAD_LONG_PRESS_MS))
+  {
+    keypad_long_press_handled = 1U;
+    Keypad_HandleLongPress(keypad_stable_key);
   }
 }
 
@@ -3660,6 +5504,28 @@ static uint8_t Keypad_ScanRaw(void)
 
 static void Keypad_HandlePress(uint8_t key)
 {
+  if (communication_mode == COMM_MODE_UNSELECTED)
+  {
+    if (key == 'A')
+    {
+      CommunicationMode_Select(COMM_MODE_STANDARD);
+    }
+    else if (key == 'B')
+    {
+      CommunicationMode_Select(COMM_MODE_MULTI_NODE);
+    }
+    else if (key == 'C')
+    {
+      CommunicationMode_Select(COMM_MODE_HIDDEN);
+    }
+    else
+    {
+      printf("select communication mode: A=STANDARD B=MULTI-NODE C=HIDDEN\r\n");
+      OLED_PrintMode();
+    }
+    return;
+  }
+
   if (key == '*')
   {
     App_ToggleMode();
@@ -3668,11 +5534,194 @@ static void Keypad_HandlePress(uint8_t key)
 
   if (app_mode == APP_MODE_RX)
   {
+    if ((communication_mode == COMM_MODE_MULTI_NODE) &&
+        (key >= '1') && (key <= '3'))
+    {
+      if (msg_rx_state == MSG_RX_SEARCH)
+      {
+        Node_SetLocalId((uint8_t)(key - '0'));
+      }
+      else
+      {
+        printf("node ID change ignored while a frame is active\r\n");
+      }
+      return;
+    }
+    if ((communication_mode == COMM_MODE_MULTI_NODE) && (key == 'D'))
+    {
+      if (msg_rx_state == MSG_RX_SEARCH)
+      {
+        Node_CycleDestination();
+      }
+      else
+      {
+        printf("destination change ignored while a frame is active\r\n");
+      }
+      return;
+    }
+    if (calibration_failed != 0U)
+    {
+      printf("RX calibration failed at PGA=x%u ADC=%s min=%u max=%u; toggle mode and resend calibration\r\n",
+             rx_pga_gain_values[rx_pga_gain_code], PGA_AdcQuality(),
+             calibration_adc_min_seen, calibration_adc_max_seen);
+      OLED_PrintRxStatus();
+      return;
+    }
+    if (calibration_complete == 0U)
+    {
+      if (((communication_mode == COMM_MODE_STANDARD) ||
+           (communication_mode == COMM_MODE_HIDDEN)) &&
+          ((key == 'A') || (key == 'B')))
+      {
+        (void)PGA_ManualAdjust((key == 'A') ? -1 : 1);
+        return;
+      }
+      printf("RX calibration PGA: automatic AGC plus manual A=down B=up; pass 1 auto up/down, pass 2 auto down-only; current=x%u ADC=%s min=%u max=%u\r\n",
+             rx_pga_gain_values[rx_pga_gain_code], PGA_AdcQuality(),
+             calibration_adc_min_seen, calibration_adc_max_seen);
+      OLED_PrintRxStatus();
+      return;
+    }
     MessageStore_HandleRxKey((char)key);
     return;
   }
 
   Editor_ProcessKey((char)key);
+}
+
+static void Keypad_HandleLongPress(uint8_t key)
+{
+  if (((communication_mode != COMM_MODE_STANDARD) &&
+       (communication_mode != COMM_MODE_HIDDEN)) ||
+      (app_mode != APP_MODE_RX) ||
+      (calibration_complete == 0U) ||
+      ((key != 'A') && (key != 'B')))
+  {
+    return;
+  }
+
+  (void)PGA_ManualAdjust((key == 'A') ? -1 : 1);
+}
+
+/* 16x16 page-oriented glyphs used only by the required startup screen. */
+static const uint8_t splash_sheng[32] = {
+  0x04, 0x14, 0xD4, 0x54, 0x54, 0x54, 0x54, 0xDF, 0x54, 0x54, 0x54, 0x54, 0xD4, 0x14, 0x04, 0x00,
+  0x80, 0x60, 0x1F, 0x02, 0x02, 0x02, 0x02, 0x03, 0x02, 0x02, 0x02, 0x02, 0x03, 0x00, 0x00, 0x00
+};
+static const uint8_t splash_yu[32] = {
+  0x40, 0x42, 0xCC, 0x00, 0x00, 0x82, 0x92, 0x92, 0xF2, 0x9E, 0x92, 0x92, 0xF2, 0x82, 0x80, 0x00,
+  0x00, 0x00, 0x7F, 0x20, 0x10, 0x00, 0xFC, 0x44, 0x44, 0x44, 0x44, 0x44, 0xFC, 0x00, 0x00, 0x00
+};
+static const uint8_t splash_xin[32] = {
+  0x00, 0x80, 0x60, 0xF8, 0x07, 0x00, 0x04, 0x24, 0x24, 0x25, 0x26, 0x24, 0x24, 0x24, 0x04, 0x00,
+  0x01, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xF9, 0x49, 0x49, 0x49, 0x49, 0x49, 0xF9, 0x00, 0x00
+};
+static const uint8_t splash_shi[32] = {
+  0x80, 0x60, 0xF8, 0x07, 0x04, 0xE4, 0x24, 0x24, 0x24, 0xFF, 0x24, 0x24, 0x24, 0xE4, 0x04, 0x00,
+  0x00, 0x00, 0xFF, 0x00, 0x80, 0x81, 0x45, 0x29, 0x11, 0x2F, 0x41, 0x41, 0x81, 0x81, 0x80, 0x00
+};
+static const uint8_t splash_ding[32] = {
+  0x00, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0xFE, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x80, 0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+static const uint8_t splash_cong[32] = {
+  0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x80, 0x40, 0x30, 0x0E, 0x01, 0x82, 0x4C, 0x20, 0x18, 0x07, 0x00, 0x07, 0x18, 0x60, 0x80, 0x00
+};
+static const uint8_t splash_zhe[32] = {
+  0x00, 0x24, 0xA4, 0x24, 0xFF, 0x14, 0x14, 0x80, 0x7E, 0x12, 0x12, 0x12, 0xF1, 0x11, 0x10, 0x00,
+  0x00, 0x00, 0x00, 0xFD, 0x44, 0x44, 0x45, 0x44, 0x44, 0x44, 0x44, 0xFC, 0x01, 0x00, 0x00, 0x00
+};
+static const uint8_t splash_fan[32] = {
+  0x04, 0x44, 0x84, 0x14, 0x64, 0x0F, 0x04, 0xE4, 0x24, 0x2F, 0x24, 0x24, 0xE4, 0x04, 0x04, 0x00,
+  0x00, 0x08, 0x09, 0x78, 0x04, 0x03, 0x00, 0x3F, 0x40, 0x40, 0x42, 0x44, 0x43, 0x40, 0x78, 0x00
+};
+static const uint8_t splash_jia[32] = {
+  0x02, 0x02, 0x0A, 0xEA, 0xAA, 0xAA, 0xAA, 0xAF, 0xAA, 0xAA, 0xAA, 0xEA, 0x0A, 0x02, 0x02, 0x00,
+  0x82, 0x4A, 0x2A, 0x1E, 0x0B, 0x4A, 0x8A, 0x7A, 0x02, 0xFA, 0x4B, 0x4A, 0x4A, 0xFA, 0x02, 0x00
+};
+static const uint8_t splash_yi[32] = {
+  0x20, 0x24, 0xAC, 0x75, 0xA6, 0x34, 0x2C, 0xA4, 0xA0, 0x9E, 0x82, 0x82, 0x9E, 0xA0, 0x20, 0x00,
+  0x49, 0x49, 0x24, 0x52, 0x89, 0x7F, 0x05, 0x98, 0x80, 0x43, 0x2C, 0x10, 0x2C, 0x43, 0x80, 0x00
+};
+static const uint8_t splash_song[32] = {
+  0x10, 0x8C, 0x84, 0x84, 0x84, 0x84, 0x85, 0xF6, 0x84, 0x84, 0x84, 0x84, 0x84, 0x94, 0x0C, 0x00,
+  0x20, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01, 0xFF, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x20, 0x00
+};
+static const uint8_t splash_heng[32] = {
+  0x00, 0xE0, 0x00, 0xFF, 0x10, 0x20, 0x02, 0xF2, 0x92, 0x92, 0x92, 0x92, 0x92, 0xF2, 0x02, 0x00,
+  0x01, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x40, 0x4F, 0x44, 0x44, 0x44, 0x44, 0x44, 0x4F, 0x40, 0x00
+};
+
+static void OLED_SplashBlitGlyph16(uint8_t *row, uint8_t col,
+                                   const uint8_t *glyph)
+{
+  if (col > (OLED_WIDTH - 16U))
+  {
+    return;
+  }
+  memcpy(&row[col], glyph, 16U);
+  memcpy(&row[OLED_WIDTH + col], &glyph[16], 16U);
+}
+
+static void OLED_SplashBlitAscii(uint8_t *row, uint8_t col, const char *text)
+{
+  while ((*text != '\0') && (col <= (OLED_WIDTH - 6U)))
+  {
+    const uint8_t *glyph = OLED_Font5x7(*text++);
+
+    for (uint8_t i = 0U; i < 5U; i++)
+    {
+      uint16_t shifted = (uint16_t)glyph[i] << 4U;
+      row[col + i] = (uint8_t)(shifted & 0xFFU);
+      row[OLED_WIDTH + col + i] = (uint8_t)(shifted >> 8U);
+    }
+    col += 6U;
+  }
+}
+
+static void OLED_SplashWriteRow(uint8_t first_page, const uint8_t *row)
+{
+  OLED_SetCursor(0U, first_page);
+  OLED_WriteData(row, OLED_WIDTH);
+  OLED_SetCursor(0U, (uint8_t)(first_page + 1U));
+  OLED_WriteData(&row[OLED_WIDTH], OLED_WIDTH);
+}
+
+static void OLED_SplashWriteMember(uint8_t first_page, const char *student_id,
+                                   const uint8_t *name0, const uint8_t *name1,
+                                   const uint8_t *name2)
+{
+  uint8_t row[OLED_WIDTH * 2U];
+
+  memset(row, 0, sizeof(row));
+  OLED_SplashBlitAscii(row, 14U, student_id);
+  OLED_SplashBlitGlyph16(row, 66U, name0);
+  OLED_SplashBlitGlyph16(row, 82U, name1);
+  OLED_SplashBlitGlyph16(row, 98U, name2);
+  OLED_SplashWriteRow(first_page, row);
+}
+
+static void OLED_ShowStartupScreen(void)
+{
+  uint8_t title[OLED_WIDTH * 2U];
+
+  if (oled_ready == 0U)
+  {
+    return;
+  }
+
+  OLED_Clear();
+  memset(title, 0, sizeof(title));
+  OLED_SplashBlitGlyph16(title, 32U, splash_sheng);
+  OLED_SplashBlitGlyph16(title, 48U, splash_yu);
+  OLED_SplashBlitGlyph16(title, 64U, splash_xin);
+  OLED_SplashBlitGlyph16(title, 80U, splash_shi);
+  OLED_SplashWriteRow(0U, title);
+
+  OLED_SplashWriteMember(2U, "24361004", splash_ding, splash_cong, splash_zhe);
+  OLED_SplashWriteMember(4U, "24271097", splash_fan, splash_jia, splash_yi);
+  OLED_SplashWriteMember(6U, "24211218", splash_song, splash_jia, splash_heng);
 }
 
 static uint8_t OLED_Init(void)
@@ -3903,6 +5952,14 @@ static void OLED_PrintDetected(const FSK_DetectResult *result)
 static void OLED_PrintMode(void)
 {
   OLED_Clear();
+  if (communication_mode == COMM_MODE_UNSELECTED)
+  {
+    OLED_PrintLine(0U, "SELECT COMM MODE");
+    OLED_PrintLine(2U, "A=STANDARD B=MULTI");
+    OLED_PrintLine(4U, "C=HIDDEN HIGH FSK");
+    OLED_PrintLine(6U, "B:NO CAL C:CAL");
+    return;
+  }
   OLED_PrintRxStatus();
   OLED_PrintTxStatus();
 }
@@ -3933,6 +5990,7 @@ static void OLED_PrintTextRows(const char *text, uint8_t len)
 static void OLED_PrintRxStatus(void)
 {
   char line[22];
+  char endpoint[5];
   const char *display_text = "";
   uint8_t display_len = 0U;
 
@@ -3940,23 +5998,84 @@ static void OLED_PrintRxStatus(void)
   {
     return;
   }
+  if (communication_mode == COMM_MODE_UNSELECTED)
+  {
+    OLED_PrintMode();
+    return;
+  }
+  if (local_node_id == 0U)
+  {
+    OLED_PrintLine(0U, "SET NODE: PRESS 1/2/3");
+    OLED_PrintLine(2U, "THEN D=DESTINATION");
+    OLED_PrintLine(4U, "0=ALL 1/2/3=NODE");
+    OLED_PrintLine(6U, "MULTI NO CAL PGAx2");
+    return;
+  }
+
+  if (communication_mode == COMM_MODE_STANDARD)
+  {
+    (void)snprintf(endpoint, sizeof(endpoint), "STD");
+  }
+  else if (communication_mode == COMM_MODE_HIDDEN)
+  {
+    (void)snprintf(endpoint, sizeof(endpoint), "HID");
+  }
+  else
+  {
+    (void)snprintf(endpoint, sizeof(endpoint), "N%u", local_node_id);
+  }
+
+  if (calibration_failed != 0U)
+  {
+    (void)snprintf(line, sizeof(line), "%s RX CAL FAIL Gx%u",
+                   endpoint,
+                   rx_pga_gain_values[rx_pga_gain_code]);
+    OLED_PrintLine(0U, line);
+    (void)snprintf(line, sizeof(line), "ADC %u-%u",
+                   calibration_adc_min_seen, calibration_adc_max_seen);
+    OLED_PrintLine(2U, line);
+    OLED_PrintLine(4U, "CLIP AT MIN GAIN");
+    OLED_PrintLine(6U, "* RETRY CAL");
+    return;
+  }
 
   if (calibration_complete == 0U)
   {
-    if (message_store_count > 0U)
+    if (calibration_pass == 0U)
     {
-      const StoredMessage *stored = &message_store_cache[message_store_view_index];
-
-      display_text = stored->text;
-      display_len = stored->len;
+      (void)snprintf(line, sizeof(line), "%s RX CAL1 Gx%u",
+                     endpoint,
+                     rx_pga_gain_values[rx_pga_gain_code]);
     }
-    (void)snprintf(line, sizeof(line), "RX CAL %u/4 %s",
-                   calibration_stage + 1U,
-                   (calibration_capture_active != 0U) ? "GAVG" : "WAIT");
+    else
+    {
+      (void)snprintf(line, sizeof(line), "%s RX CAL2 %u/4 Gx%u",
+                     endpoint,
+                     calibration_stage + 1U,
+                     rx_pga_gain_values[rx_pga_gain_code]);
+    }
+    OLED_PrintLine(0U, line);
+    if (calibration_adc_min_seen == 0xFFFFU)
+    {
+      OLED_PrintLine(2U, "ADC WAIT SIGNAL");
+    }
+    else
+    {
+      (void)snprintf(line, sizeof(line), "ADC %u-%u",
+                     calibration_adc_min_seen, calibration_adc_max_seen);
+      OLED_PrintLine(2U, line);
+    }
+    OLED_PrintLine(4U, (calibration_pass == 0U) ?
+                   "AUTO+A/B UP/DOWN" : "AUTO DOWN A/B BOTH");
+    (void)snprintf(line, sizeof(line), "LEVEL %s", PGA_AdcQuality());
+    OLED_PrintLine(6U, line);
+    return;
   }
   else if ((message_store_last_save_failed != 0U) && (rx_message_valid != 0U))
   {
-    (void)snprintf(line, sizeof(line), "RX NOSAVE L%u", rx_message_len);
+    (void)snprintf(line, sizeof(line), "%s Gx%u RX<%u NOSAVE",
+                   endpoint, rx_pga_gain_values[rx_pga_gain_code],
+                   rx_message_source_id);
     display_text = rx_message;
     display_len = rx_message_len;
   }
@@ -3964,26 +6083,32 @@ static void OLED_PrintRxStatus(void)
   {
     const StoredMessage *stored = &message_store_cache[message_store_view_index];
 
-    (void)snprintf(line, sizeof(line), "RX MEM %u/%u L%u",
+    (void)snprintf(line, sizeof(line), "%s Gx%u RX<%u M%u/%u",
+                   endpoint, rx_pga_gain_values[rx_pga_gain_code], stored->source,
                    message_store_view_index + 1U,
-                   message_store_count,
-                   stored->len);
+                   message_store_count);
     display_text = stored->text;
     display_len = stored->len;
   }
   else if (rx_message_valid != 0U)
   {
-    (void)snprintf(line, sizeof(line), "RX OK L%u RS+%u", rx_message_len, rx_rs_corrected);
+    (void)snprintf(line, sizeof(line), "%s Gx%u RX<%u OK L%u",
+                   endpoint, rx_pga_gain_values[rx_pga_gain_code],
+                   rx_message_source_id, rx_message_len);
     display_text = rx_message;
     display_len = rx_message_len;
   }
   else if (rx_sampling_active == 0U)
   {
-    (void)snprintf(line, sizeof(line), "RX PAUSED MEM0");
+    (void)snprintf(line, sizeof(line), "%s Gx%u >%s PAUSE",
+                   endpoint, rx_pga_gain_values[rx_pga_gain_code],
+                   Node_DestinationLabel(tx_destination_id));
   }
   else
   {
-    (void)snprintf(line, sizeof(line), "RX LISTEN MEM0");
+    (void)snprintf(line, sizeof(line), "%s Gx%u >%s LISTEN",
+                   endpoint, rx_pga_gain_values[rx_pga_gain_code],
+                   Node_DestinationLabel(tx_destination_id));
   }
 
   OLED_PrintLine(0U, line);
@@ -3993,6 +6118,7 @@ static void OLED_PrintRxStatus(void)
 static void OLED_PrintTxStatus(void)
 {
   char line[22];
+  char endpoint[5];
   char preview[MESSAGE_MAX_LEN + 2U];
   uint8_t preview_len = tx_text_len;
 
@@ -4001,15 +6127,30 @@ static void OLED_PrintTxStatus(void)
     return;
   }
 
+  if (communication_mode == COMM_MODE_STANDARD)
+  {
+    (void)snprintf(endpoint, sizeof(endpoint), "STD");
+  }
+  else if (communication_mode == COMM_MODE_HIDDEN)
+  {
+    (void)snprintf(endpoint, sizeof(endpoint), "HID");
+  }
+  else
+  {
+    (void)snprintf(endpoint, sizeof(endpoint), "N%u", local_node_id);
+  }
+
   if (tx_calibration_sent == 0U)
   {
     if (tx_mode == TX_MODE_CALIBRATION)
     {
-      (void)snprintf(line, sizeof(line), "TX CAL SENDING");
+      (void)snprintf(line, sizeof(line), "%s>%s CAL SEND",
+                     endpoint, Node_DestinationLabel(tx_destination_id));
     }
     else
     {
-      (void)snprintf(line, sizeof(line), "TX CAL PRESS #");
+      (void)snprintf(line, sizeof(line), "%s>%s CAL PRESS #",
+                     endpoint, Node_DestinationLabel(tx_destination_id));
     }
     OLED_PrintLine(0U, line);
     OLED_PrintTextRows("", 0U);
@@ -4028,7 +6169,8 @@ static void OLED_PrintTxStatus(void)
     preview[preview_len] = '\0';
   }
 
-  (void)snprintf(line, sizeof(line), "TX %s L%u/%u",
+  (void)snprintf(line, sizeof(line), "%s>%s %s L%u/%u",
+                 endpoint, Node_DestinationLabel(tx_destination_id),
                  (tx_display_sending != 0U) ? "SEND" : "EDIT",
                  preview_len, MESSAGE_MAX_LEN);
   OLED_PrintLine(0U, line);
@@ -4073,7 +6215,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if ((hadc->Instance == ADC1) && (rx_sampling_active != 0U))
   {
-    symbol_start_index = FSK_SYMBOL_SAMPLES;
+    symbol_start_index = fsk_symbol_samples;
     symbol_ready = 1U;
   }
 }
@@ -4081,7 +6223,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 
 int main(void)
 {
-  PowerHold_EarlyOn();
+  PowerKill_EarlyKeepAlive();
 
   HAL_Init();
   SystemClock_Config();
@@ -4096,41 +6238,72 @@ int main(void)
   MX_USART2_UART_Init();
 
   DAC_Write12(TX_DAC_MID_CODE);
-  PGA_SetGain(RX_PGA_GAIN_CODE);
+  rx_pga_gain_code = RX_PGA_DEFAULT_GAIN_CODE;
+  PGA_SetGain(rx_pga_gain_code);
 
   FSK_Init();
   RS_Init();
   MessageStore_Init();
   HAL_Delay(300U);
-  (void)OLED_Init();
+  if (OLED_Init() != 0U)
+  {
+    OLED_ShowStartupScreen();
+    HAL_Delay(2000U);
+  }
   OLED_PrintMode();
 
-  printf("\r\nSecond board 4-FSK RX/TX start\r\n");
-  printf("HALF DUPLEX: RX PC4 via MCP6S21 x%u, TX MCP4921 DAC, *=RX/TX\r\n",
-         RX_PGA_GAIN_VALUE);
-  printf("SPI1 MODE0 4MHz: SCK PA5, MOSI PA7, DAC_CS PB0, PGA_CS PA6\r\n");
-  printf("POWER: SW2 PB9, HOLD PC1; AMP_MUTE PB12 active high\r\n");
+  printf("\r\nThree-mode 4-FSK RX/TX start\r\n");
+  printf("SELECT MODE: A=STANDARD, B=MULTI-NODE (no calibration + PGA x2), C=HIDDEN (high-frequency + calibration)\r\n");
+  printf("HALF DUPLEX: RX PC4 via MCP6S21, TX MCP4921 DAC; select mode first, then *=RX/TX\r\n");
+  printf("CLOCK: 25MHz HSE -> 96MHz PLL, TIM2 ADC=16kHz NORMAL/20kHz HIDDEN, TIM3 DAC=32kHz\r\n");
+  printf("SPI1 MODE0 6MHz: SCK PA5, MOSI PA7, DAC_CS PB0, PGA_CS PA6\r\n");
+  printf("POWER: LTC2950 PB9=INT# active low, PC1=KILL; AMP_MUTE PB12 active high\r\n");
   printf("KEYPAD: 1 2 3 A / 4 5 6 B / 7 8 9 C / * 0 # D\r\n");
-  printf("EDITOR: phone multi-tap, A=LEFT B=RIGHT C=DELETE D=CLEAR *=RX/TX #=CAL-FIRST/SEND\r\n");
+  printf("TX EDITOR: phone multi-tap, A=LEFT B=RIGHT C=DELETE D=CLEAR *=RX/TX; STANDARD/HIDDEN first #=CAL, MULTI #=SEND\r\n");
+  printf("MULTI-NODE: no calibration, PGA fixed x2; in RX press 1/2/3=set local ID, D=cycle destination ALL/N1/N2/N3\r\n");
+  printf("ROUTING: START0=source ID encoded as 00/01/10, START1=destination 00=ALL 01/10/11=N1/N2/N3\r\n");
+  printf("RX PROFILES: STANDARD/MULTI=NORMAL, HIDDEN=HIGH; both communicating boards must select the same mode\r\n");
+  printf("STANDARD/HIDDEN CAL PGA: automatic plus RX keys A=down/B=up manual override; auto down requires valid tone (HIGH %u, CLIP %u windows); pass1 auto up/down, pass2 auto down-only\r\n",
+         RX_PGA_AGC_HIGH_WINDOWS, RX_PGA_AGC_CLIP_WINDOWS);
+  printf("LED3 PB7 active low: on for calibration/message TX, off when idle\r\n");
   printf("RX MEMORY: A=OLDER B=NEWER C=LATEST, saved=%u/5; BLUE LED=RX COMPLETE\r\n",
          message_store_count);
-  printf("Fs=%uHz, symbol=%ums, samples=%u\r\n",
-         FSK_FS_HZ, FSK_SYMBOL_MS, FSK_SYMBOL_SAMPLES);
-  printf("FEC: %ux RS(%u,%u) GF(64), payload=%u chars parity=%u, t=%u per block/%u total\r\n",
-         RS_BLOCK_COUNT, RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS, RS_TOTAL_DATA_SYMBOLS,
+  printf("ADC windows: NORMAL=%uHz/%u samples, HIDDEN=%uHz/%u samples, symbol=%ums\r\n",
+         FSK_NORMAL_FS_HZ, FSK_NORMAL_SYMBOL_SAMPLES,
+         FSK_HIDDEN_FS_HZ, FSK_HIDDEN_SYMBOL_SAMPLES, FSK_SYMBOL_MS);
+  printf("FEC: %ux RS(%u,%u) GF(64), payload=%u chars + CRC12/%u symbols, parity=%u, t=%u per block/%u total\r\n",
+         RS_BLOCK_COUNT, RS_CODEWORD_SYMBOLS, RS_DATA_SYMBOLS, MESSAGE_MAX_LEN,
+         MESSAGE_CRC_SYMBOLS,
          RS_TOTAL_PARITY_SYMBOLS, RS_CORRECTABLE_SYMBOLS, RS_TOTAL_CORRECTABLE);
+  printf("FEC erasures: known codeword positions retained; each block decodes 2*errors+erasures<=%u\r\n",
+         RS_PARITY_SYMBOLS);
+  printf("FEC GMD: failed blocks retry with least-reliable RS symbols, up to %u total erasures/block\r\n",
+         RS_PARITY_SYMBOLS);
+  printf("CRC12: 0x80F over source+destination+all %u padded text symbols; CRC guides GMD candidate selection\r\n",
+         MESSAGE_MAX_LEN);
   printf("FSK whitening: ON, mask cycle=00/01/10/11\r\n");
-  printf("RS framing marker: %uHz before every 6-bit RS symbol\r\n", FSK_SYNC_FREQ_HZ);
+  printf("FSK NORMAL: data=%u/%u/%u/%uHz sync=%uHz\r\n",
+         fsk_normal_freqs_hz[0], fsk_normal_freqs_hz[1], fsk_normal_freqs_hz[2], fsk_normal_freqs_hz[3],
+         fsk_normal_freqs_hz[FSK_SYNC_SYMBOL]);
+  printf("FSK HIDDEN: data=%u/%u/%u/%uHz sync=%uHz\r\n",
+         fsk_high_freqs_hz[0], fsk_high_freqs_hz[1], fsk_high_freqs_hz[2], fsk_high_freqs_hz[3],
+         fsk_high_freqs_hz[FSK_SYNC_SYMBOL]);
+  printf("RS framing marker: %uHz before every 6-bit RS symbol\r\n",
+         fsk_tx_freqs_hz[FSK_SYNC_SYMBOL]);
   printf("TX timing: %u tones, %u+%u=%ums each, frame=%ums\r\n",
          TX_FRAME_MAX_SYMBOLS, TX_TONE_MS, TX_GAP_MS, TX_STEP_MS, TX_FRAME_DURATION_MS);
   printf("RS capture: all valid 20ms windows; slots=40..139/140..199/200..259ms\r\n");
   printf("RX adapt: timed PREAMBLE recovery + per-data-bin soft fallback + END soft/repeat guard\r\n");
-  printf("RX fix: PREAMBLE top-2 energy + 50pct scale smoothing\r\n");
-  printf("MANUAL CAL: enter TX and press #; first # sends only 00/01/10/11 for %ums each\r\n",
-         CALIBRATION_TONE_MS);
-  printf("CAL RX: fixed 1500/2500/3500/4500Hz Goertzel, %u-window mean energy\r\n",
+  printf("RX scale: PREAMBLE top2 mean / qualified top1 fallback + bounded frame sqrt correction (0.5x..2.0x)\r\n");
+  printf("STANDARD/HIDDEN CAL: first # sends 00/01/10/11 as %u+%ums bursts for %ums each\r\n",
+         TX_TONE_MS, TX_GAP_MS, CALIBRATION_STAGE_MS);
+  printf("CAL RX: profile-fixed %u/%u/%u/%uHz Goertzel, %u-window mean energy\r\n",
+         fsk_tx_freqs_hz[0], fsk_tx_freqs_hz[1], fsk_tx_freqs_hz[2], fsk_tx_freqs_hz[3],
          CALIBRATION_ENERGY_WINDOWS);
-  printf("RS self-test: %s\r\n", (RS_SelfTest() != 0U) ? "PASS" : "FAIL");
+  printf("RS errors+erasures+GMD self-test (5e, 10s, 3e+4s, 6e->2s): %s\r\n",
+         (RS_SelfTest() != 0U) ? "PASS" : "FAIL");
+  printf("CRC12 self-test (text=0x708, N1->N2 addressed=0x780): %s\r\n",
+         (Message_CrcSelfTest() != 0U) ? "PASS" : "FAIL");
 
   if (HAL_TIM_Base_Start_IT(&htim3) != HAL_OK)
   {
@@ -4139,19 +6312,15 @@ int main(void)
 
   HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
 
-  if (RX_StartSampling() == 0U)
-  {
-    Error_Handler();
-  }
-  printf("half duplex: RX listening\r\n");
-  OLED_PrintRxStatus();
+  printf("receiver paused until mode selection\r\n");
+  OLED_PrintMode();
 
   while (1)
   {
     StatusLed_Update();
     Keypad_Task();
     Editor_Task();
-    PowerKey_Task();
+    PowerInt_Task();
     OLED_RetryInitTask();
 
     if ((symbol_ready != 0U) && (rx_sampling_active != 0U))
@@ -4180,10 +6349,16 @@ void SystemClock_Config(void)
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  /* X5 is a 25 MHz crystal.  Run the core and both audio timers from the
+     crystal-derived 96 MHz PLL so separate boards share a ppm-class timebase. */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 25U;
+  RCC_OscInitStruct.PLL.PLLN = 192U;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4U;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -4191,12 +6366,12 @@ void SystemClock_Config(void)
 
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                                 RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -4258,7 +6433,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -4277,7 +6452,7 @@ static void MX_TIM2_Init(void)
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
+  htim2.Init.Prescaler = 5U;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 999;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -4304,7 +6479,7 @@ static void MX_TIM2_Init(void)
 static void MX_TIM3_Init(void)
 {
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
+  htim3.Init.Prescaler = 5U;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 499U;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -4350,8 +6525,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   HAL_GPIO_WritePin(BOARD_LED_GPIO_Port, BOARD_LED_Pin, BOARD_LED_OFF);
+  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, TX_LED_OFF);
   HAL_GPIO_WritePin(AMP_MUTE_GPIO_Port, AMP_MUTE_Pin, AMP_MUTE_ON);
-  HAL_GPIO_WritePin(POWER_HOLD_GPIO_Port, POWER_HOLD_Pin, POWER_HOLD_ON);
+  HAL_GPIO_WritePin(POWER_KILL_GPIO_Port, POWER_KILL_Pin, POWER_KILL_KEEP_ON);
   HAL_GPIO_WritePin(DAC_CS_GPIO_Port, DAC_CS_Pin, DAC_CS_INACTIVE);
   HAL_GPIO_WritePin(PGA_CS_GPIO_Port, PGA_CS_Pin, PGA_CS_INACTIVE);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_SET);
@@ -4362,6 +6538,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(BOARD_LED_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = TX_LED_Pin;
+  HAL_GPIO_Init(TX_LED_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = AMP_MUTE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -4378,16 +6557,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = PGA_CS_Pin;
   HAL_GPIO_Init(PGA_CS_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = POWER_HOLD_Pin;
+  GPIO_InitStruct.Pin = POWER_KILL_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(POWER_HOLD_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(POWER_KILL_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = POWER_KEY_Pin;
+  GPIO_InitStruct.Pin = POWER_INT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(POWER_KEY_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(POWER_INT_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
