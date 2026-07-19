@@ -11,7 +11,7 @@
 | 内容 | 状态 | 入口 |
 | --- | --- | --- |
 | 第二版三模式固件 | **当前主工程** | [`software/stm32_second_board/`](software/stm32_second_board/) |
-| 第二版原理图与 PCB | **当前硬件** | [`hardware/syxs_board/`](hardware/syxs_board/) |
+| 第二版原理图与 PCB | **当前硬件；最新版为 `声波传输test2final.epro2`** | [`hardware/syxs_board/`](hardware/syxs_board/) |
 | 7 月 13 日起非代码日志 | **当前整理版** | [`logs/工作日志-9组-范嘉毅-24271097.md`](logs/工作日志-9组-范嘉毅-24271097.md) |
 | 课程任务书和设计资料 | 正式/阶段资料 | [`docs/`](docs/) |
 | 第一版与分立收发工程 | 历史测试工程 | [`software/README.md`](software/README.md) |
