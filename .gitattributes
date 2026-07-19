@@ -9,7 +9,7 @@
 *.ioc text eol=lf
 *.uvprojx text eol=lf
 *.uvoptx text eol=lf
-*.hex text eol=lf
+*.hex binary
 
 *.pdf binary
 *.docx binary
