@@ -6,7 +6,8 @@
 
 - `声语信使.pdf`：第二版整板原理图，查看和答辩说明优先使用。
 - `声语信使网表.net`：第二版整板网表，用于核对网络连接。
-- `声语信使第二版_含PCB.epro2`：EasyEDA Pro 原理图与 PCB 工程。
+- `声波传输test2final.epro2`：**当前最新版**嘉立创 EDA 专业版原理图与 PCB 工程。
+- `声语信使第二版_含PCB.epro2`：较早的第二版 EasyEDA Pro 工程包，保留作历史对照。
 - `Altium_声语信使第二版_含PCB.zip`：Altium 导出工程包。
 
 实物调试中发生的器件值变化见 [`syxs_board/README.md`](syxs_board/README.md)，排障时应同时核对原理图标称值和板上实装值。
